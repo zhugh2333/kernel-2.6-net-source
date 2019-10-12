@@ -1,0 +1,246 @@
+
+
+被icmp调用处理err
+header表示引起错误的原始数据包的ip头以及udp头
+void  udep_err(int err,unsigned char*header,unsigned long daddr,unsigned long saddr,struct inet_protocol*protocol)
+{
+   。。。
+}
+
+计算udp效验值返回一个16位值
+unsigned short udp_check(struct udphdr*uh,int len,unsigned long saddr,unsigned long daddr)
+{
+   ...
+}
+
+void udp_send_check(struct udphdr*uh,unsigned long saddr,unsigned long daddr,int len,struct sock*sk)
+{
+    uh->check=0;
+    if(sk&&sk->no_check==0)//不用效验
+      return；
+	uh->check=udep_check(...);
+    if(uh->check==0)
+       uh->check=0xffff;	
+}
+
+udp send skb
+int udp_sendto(struct sock*sk,struct sockaddr_in *sin,unsigned long *from,int len,int rt)
+{
+    //获取总大小
+	size=sk->prot->max_header+len;
+	//获取skb
+	skb=sock_alloc_send_skb(sk,size,0,&tmp);//用于分配指定大小的sk_buff
+	if(sk==NULL)
+	   return tmp;
+	//初始化skb
+    skb->sk=sk;
+    skb->free=1;//因为udp不需要缓存，skb->free=1表示网络层发包不需要讲此skb挂在重发队列	
+	skb->localroute=sk->localroute|(rt&MSG_DONTROUTE);
+	buff=skb->data;
+	saddr=sk->saddr;
+	dev=NULL;
+	ttl=sk->ip_ttl;
+	//创建ip头以及mac
+	tmp=sk->prot->build_header(skb,saddr,sin->sin_addr.s_addr,&dev,IPPROTO_UDP,sk->opt,skb->meme_len,sk->ip_tos,ttl);
+	buff+=tmp;
+	saddr=skb->saddr;
+	skb->len=tmp+sizeof(struct udphdr)+len;
+	skb->dev=dev;
+	uh=(struct udphdr*)buff;
+	uh->len=htons(len+sizeof(struct udphdr));//初始化uh长度
+	uh->source=sk->dummy_th.source;//初始化目的端口
+	uh->dest=sin->sin_port;//初始化源端口
+	buff=(struct udphdr*)(uh+1);
+	//拷贝数据
+	memcpy_fs(buff,from,len);
+	udp_send_check(...);
+	//计数
+	sk->prot->queue_xmit(sk,dev,skb,1);//实际调用的是ip_queue_xmit；
+	return len;	
+}
+
+
+int udp_sendto(struct sock*sk,unsigned char*from,int len,int noblock,unsigned flags,struct sockaddr_in *usin,int addr_len)
+{
+   if(usin)
+   {
+        if(addr_len<sizeof(usin))
+	      return -EINVAL;
+		memcpy(sin,usin,sizeof(sin));
+		if(sin.sin_family&&sin.sin_family!=AF_INET)
+		   return -EINVAL;
+		if(sin->sin_port==0)
+           return -EINVAL;		
+   }
+   else//未指定目地址usin地址
+   {
+        if(sk->state!=TCP_ESTABLISHED)
+		   return -EINVAL;
+		sin.sin_family=AF_INET;
+		sin.sin_port=sk->dummy_th.dest;
+		sin.sin_addr.s_addr=sk->daddr;
+   }
+    if(sin.sin_addr.s_addr==INADDR_ANY)
+        sin.sin_addr.s_addr=ip_my_addr();
+	sk->inuse=1;
+    tmp=tcp_send(sk,&sin,from,len,flags);
+    release_sock(sk);
+    return tmp;	
+}
+
+
+udp_write是直接对udp_sendto的封装
+
+int  udp_ioctl(struct sock*sk,int cmd,unsigned long arg)
+{
+     .....
+}
+
+
+int  udp_recvfrom(struct sock*sk,unsigned char*to,int len,int nopblock,unisgned flags,struct sockaddr_in*sin,int *addr_len)
+{
+    if(addr_len)
+       *addr_len=sizeof(*sin);
+	skb=skb_recv_datagram(sk,flags,noblock,&er);//此函数就是从recvive_queue取下个数据包，若无数据包还会睡眠等待
+    if(skb==NULL)
+        return er;
+    truesize=skb->len;//设置读取的数据长度
+    copied=min(len,truesize);//二者取最小
+	skb_copy_datagram(skb,sizeof(struct udphdr*),to,copied);
+	sk->stamp=skb->stamp;//更新sk时间戳为skb的
+	if(sin)
+	{
+	    sin->sin_family=AF_INET;
+		sin->sin_port=skb->h.uh->source;
+		sin->sin_addr.s_addr=skb->daddr;
+	}
+	skb_free_datagram(skb);
+	release_sock(sk);
+	return truesize;
+}
+int udp_read(struct sock*sk,unsigned char*to,int len,int nopblock,unisgned flags)
+{
+    return (udp_recvfrom(sk,buff,len,noblock,flags,NULL,NULL));
+}
+
+
+int  udp_connect(struct sock*sk,struct sockaddr_in*usin,int addr_len)
+{
+    if(addr_len<sizeof(*usin))
+	     return -EINVAL;
+	if(usin->sin_family&&usin->sin_family!=AF_INET)//参数检查支持网络套接字
+          return -EAFNOSUPPORT;
+    if(usin->sin_addr.s_addr==INADDR_ANY)
+          usin->sin_addr.s_addr=ip_my_addr();	
+	if(sk->broadcast&&ip_chk_addr(usin->sin_addr.s_addr)==IS_BROADCAST)
+          return -EACCESS;
+    rt=ip_rt_route(usin->sin_addr.s_addr,NULL,&sa);//根据源地址查找路由
+    if(rt==NULL)	
+	    return -ENETUNRACH；
+	sk->saddr=sa;//根据路由更新源地址
+    sk->daddr=usin->sin_addr.s_addr;
+	sk->dummy.th.dest=usin->sin_port;
+	sk->state=TCP_ESTABLISHED;
+	return 0;   	
+}
+
+close udp层实现
+void udp_close(struct sock*sk,int timeout)
+{
+    sk->inuse=1;
+	sk->state=TCP_CLOSE;//设置状态为关闭
+	if(sk->dead)//如果sk不使用了立即释放
+	  destroy_sock(sk);
+	else
+      release_sock(sk);		   
+}
+
+
+
+int  udp_rcv(struck skl_buff*skb,struct device*dev，struct options*opt,unsigned long daddr,unsigned long short len,unsigned long saddr,int redo,struct inet_protocol *protocol)
+{
+    if(!dev||dev->pa_addr!=daddr)//地址不是接收设备地址则读取地址类型
+       addr_type=ip_chk_addr(daddr);
+	uh=(struct udphdr*)skb->h.uh;
+	ulen=ntohs(uh->len);
+	if(ulen>len||len<sizeof(*uh)||ulen<sizeof(*uh))//长度出错
+	{
+	  kfree_skb(skb,FREE_WRITE);
+	  return 0;
+	}
+	if(uh->check&&udp_check(uh,len,saddr,daddr))//效验失败执行如下语句
+	{
+	   kfree_skb(skb,FREE_WRITE);
+	   return 0;
+	}
+	if(addr_type!=IS_MYADDR)
+	{
+	   sk=get_sock_mcast(udp.port.sock_array[ntohs(uh->dest)&(SOCK_ARRAY_SIZE-1)],saddr,uh->source,daddr);;
+	   if(sk)
+	   {
+	      do{
+		        sknext=get_sock_mcast(sk->next,uh->dest,saddr,uh->source,daddr);//获取本地多播sk
+			    if(sknext)
+			       skb1=skb_clone(skb,GFP_ATOMIC);
+				else
+                   skb1=skb;
+                if(skb1)
+                   udp_deliver(sk,uh,skb1,dev,saddr,daddr,len);
+                sk=sknext;				    
+	        }while(sknext!=NULL)
+	   
+	    }
+	    else//就是没有多播sk
+            kfree_skb(skb,FREE_READ);
+        return 0;	
+    }
+    //执行到此地说明地址是本地地址
+    sk=get_sock(&udp_prot,uh->dest,saddr,uh->source,daddr);
+    if(sk==NULL)
+    {//没找到
+	   if(addr_type==IS_MYADDR)
+	   {
+	      icmp_send(skb,ICMP_DEST_UNREACH,ICMP_PORT_UNREACH,0,dev);
+	   }
+	   skb->sk=NULL;
+	   free_skb(skb,FREE_READ);
+	}	
+	//执行到这里说明找到了
+	return udp_deliver(sk,uh,skb,dev,saddr,daddr,len);
+}
+
+int sock_queue_rcv_skb(struct sock*sk,struct sk_buff*skb)
+{
+    if(sk->rmem_alloc+skb->meme_len>=sk->rcvbuf)
+	    return -ENOMEM;
+	sk->rmrm_alloc+=skb->mem_len;
+    skb->sk=sk;
+    skb_queue_tail(&sk->receive_queue,skb);
+    if(!sk->dead)
+        sk->data_ready(sk,skb->len);//唤醒上层等待读取数据的睡眠进程	
+	return 0;	
+}
+
+将udp数据包挂在receive_queue队列
+int udp_deliver(struct sock*sk,struct udphdr*uh,struct sk_buff*skb,struct device*dev,long saddr,long daddr,int len)
+{
+   //初始化skb
+   skb->sk=sk;
+   skb->dev=dev;
+   skb->len=len;
+   skb->daddr=daddr;
+   skb->saddr=saddr;
+   skb->len=len-sizeof(*uh);//初始化skb->len为数据长度
+   if(sock_queue_rcv_skb(sk,skb)<0)//挂在数据包出错//此函数就是将skb挂在sk->receive_queue上然后唤醒睡眠进程
+   {
+      skb->sk=NULL;
+	  kfree_skb(skb,FREE_READ);
+	  release_sock(sk);
+	  return 0;
+   }
+   release_sock(sk);
+   return 0;
+}
+
+skb_recv_datagram ？ skb_copy_datagram ？
+

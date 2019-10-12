@@ -1,0 +1,290 @@
+int sock_setsockopt(struct sock*sk,int level,int optname,char*optval,int optlen)
+{
+  ...
+}
+int sock_getsockopt(struct sock*sk,int level,int optname,char*optval,int *optlen)
+{
+   .....
+}
+
+数据读写内存分配函数
+struct  sk_buff *sock_wmalloc(struct sock*sk,unsigned long size,int force,int priority)
+{
+   if(sk)
+   {
+      if(sk->wmem_alloc+size<sk->sndbuf||force)
+	  {
+	     c=alloc_skb(size,priorty);
+		 if(c)
+		 {
+		    sk->wmeme_alloc+=c->mem_len;//更新已分配写内存大小
+		 }
+		 return c;
+	  }
+       return NULL;//超过大小了不分配
+   }
+    return (alloc_skb(size,priorty));//没有sk直接分配，alloc_skb是直接调用kmalloc分配
+}
+
+数据读读内存分配函数
+struct sk_buff *sock_rmalloc(struct sock*sk,unsigned long size,int force,int priorty)
+{
+    if(sk)
+   {
+      if(sk->rmem_alloc+size<sk->rcvbuf||force)
+	  {
+	     c=alloc_skb(size,priorty);
+		 if(c)
+		 {
+		    sk->rmeme_alloc+=c->mem_len;//更新已分配写内存大小
+		 }
+		 return c;
+	  }
+       return NULL;//超过大小了不分配
+   }
+    return (alloc_skb(size,priorty));//没有sk直接分配，alloc_skb是直接调用kmalloc分配
+}
+
+
+套接字读写缓冲区空闲大小计算
+unsigned long sock_rspace(struct sock*sk)
+{
+   if(sk)
+   {
+        if(sk->rmem_alloc>=sk->rcvbuf-2*MIN_WINDOW)//空间不足2*MIN_WINDOW
+	       return 0;
+		amt=min((sk->rcvbuf-sk->rmem_alloc)/2-MIN_WINDOW,MAX_WINDOW);  
+		if(amt<0)
+		   return 0;
+		return amt;   
+   }
+   return 0;
+}
+unsigned long sock_wspace(struct sock*sk)
+{
+   if(sk!=NULL)
+   {
+        if(sk->shutdown&SEND_SHUTDOWN)
+	        return 0;
+		if(sk->wmem_alloc>sk->sndbuf) 
+		    return 0;
+		return (sk->sndbuf-sk->wmeme_alloc);	
+   }
+   return 0;
+}
+
+发送接收缓冲区接收函数
+void sock_wfree(struct sock*sk,struct sk_buff*skb,unsigned long size)
+{
+   kfree_skbmem(skb,size);
+   if(sk)
+   {
+        sk->wmeme_alloc-=size;
+	    if(!sk->dead)
+	      sk->write_space(sk);//??
+		return ;  
+	   
+   }
+}
+
+void sock_rfree(struct sock*sk,struct sk_buff*skb,unsigned long size)
+{
+   kfree_skbmem(skb,size);
+   if(sk)
+   {
+        sk->rmeme_alloc-=size;
+	    if(!sk->dead)
+	      sk->write_space(sk);//??
+		return ;  
+	   
+   }
+}
+
+
+分配发送数据包封装结构所需内存大小
+struct  sk_buff*sock_alloc_send_skb(struct sock*sk,unsigned long size,int noblock,int *errcode)
+{
+    sk->inuse=1;
+	do{
+	    if(sk->err!=0)
+		{
+		   err=-sk->err;//读取err
+		   sk->err=0;//清空sk->err
+		   *errcode=err;
+		   return NULL;
+		}
+		if(sk->shutdown&SEND_SHUTDOWN)//套接字关闭
+		{
+		   *errcode=-EPIPE;
+		   return NULL;
+		}
+		skb=sock_wmalloc(sk,size,0,GFP_KERNEL);
+		if(skb==NULL)//空间不足也就是内存不足或者是超过限定
+		{
+		   sk->socket->flags|=SO_NOSPACE;
+		   if(noblock)
+		   {
+		      *errcode=-EAGAIN;
+			   return NULL;
+		   }
+		   if(sk->shutdown&SEND_SHUTDOWN)
+		   {
+		      *errcode=-EPIPE;
+			  return NULL;
+		   }
+		   tmp=sk->wmem_alloc;
+		   if(sk->shutdown&SEND_SHUTDOWN)
+		   {
+		      *errcode=-EPIPE;
+			  return NULL;
+		   }
+		   if(tmp<=sk->wmem_alloc)
+		   {
+		      ...可中断睡眠
+		   }
+		}
+		
+	}while(skb==NULL);
+    return skb;		
+}
+
+int sock_queue_rcv_skb(struct sock*sk,struct sk_buff*skb)
+{
+    if(sk->rmeme_alloc+skb->mem_len>=sk->rcvbuf)//超过上限
+	    return -ENOMEME;
+	sk->rmem_alloc+=skb->mem_len;
+    skb->sk=sk;
+    skb->queue_tail(&sk->receive_queue,skb);
+    if(!sk->dead)
+         sk->data_ready(sk,skb->len);
+    return 0;		 
+}
+
+
+被缓冲数据包处理函数
+void release_sock(struct sock*sk)
+{
+    if(!sk->prot)
+	    return ;
+	if(sk->blog)
+        return;	
+	sk->blog=1;
+    sk->inuse=1;
+    while(skb=skb_dequeue(&sk->back_log))
+    {
+	    sk->inuse=1;
+		if(sk->prot->rcv)
+		{
+		    //调用协议接收函数
+		    sk->prot->rcv(skb,skb->dev,sk->opt,skb->saddr,skb->len,skb->daddr,1,(struct inet_protocol*)sk->pair);
+			
+		}
+
+	}
+	sk->blog=0;
+	sk->inuse=0;
+	if(sk->dead&&sk->state==TCP_CLOSE)//设置dead以及状态是CLOSE等待关闭
+	{
+        reset_timer(sk,TIME_DONE,min(sk->rtt*2，TCP_DONE_TIME))；	
+        //定时器到期执行函数
+        //case TIME_DONE:
+        //              if(!sk->dead||sk->state!=TCP_CLOSE)
+		//              {
+		//				     release_sock(sk);
+		//					 break;
+		//				}
+		//				destroy_sock(sk);//定时器到期释放sk
+		//				break;
+        //
+	
+	}    	
+}
+
+
+
+struct sk_buff*skb_rcv_datagram(stryct sock*sk,unsigned long flags,int noblock,int *err)
+{
+    sk->inuse=1;
+restart:
+	while(skb_peek(&sk->receive_queue)==NULL)
+    {//接收队列没数据
+	    if(sk->shutdown&SEND_SHUTDOWN)
+		{
+		    release_sock(sk);
+			*err=0;
+			return NULL;
+		}
+		if(sk->err)
+		{//处理出错的情况
+		    release_sock(sk);
+			*err=-sk->err;
+			sk->err=0;
+			return NULL;
+		}
+		if(sk->type==SOCK_SEQPACKET&&sk->state!=TCP_ESTABLISHED)//SOCK_SEQPACKET是一种面向报文的套接字
+		{
+		    release_sock(sk);
+			*err=-ENOTCON;
+			return NULL;
+		}
+		if(noblock)
+		{//非阻塞调用
+		    release_sock(sk);
+			*err=-EAGAIN;
+			return NULL;
+		}
+		release_sock(sk);
+		if(skb_dequeue(&sk->receive_queue)==NULL)
+		{
+		    。。。可中断睡眠sk->sleep
+			if(sk->err)
+		    {//处理出错的情况
+		         release_sock(sk);
+			    *err=-sk->err;
+			    sk->err=0;
+		    	return NULL;
+		    }
+			
+		}
+		sk->insue=1;		
+	}end while	
+	if(!flags&MSG_PEEK)
+	{
+	    skb=skb_dequeue(&skb->receive_queue);
+	    if(skb!=NULL)
+	    {
+	        skb->users++;
+	    }
+	    else
+	        goto restart;
+	}
+	else
+	{
+	    skb=skb_peek(&skb->receive_queue);
+	    if(skb!=NULL)
+	    {
+	        skb->users++;
+	    }
+	   
+	    if(skb==NULL)
+	        *err=-EAGAIN;    
+	}
+	return skb;
+}
+
+udp数据包释放函数
+void  skb_free_datagram(struct sock*sk)
+{ 
+    skb->users--;
+    if(skb->users>0)//还在使用
+        return;
+    if(!skb->next&&!skb->prev) 
+        kfree_skb(skb,FREE_READ);	
+}
+void skb_copy_datagram(struct sk_buff*skb,int offset,char*to,int size)
+{
+    memcpy_tofs(to,skb->h.raw+offset,size);
+}
+
+
+

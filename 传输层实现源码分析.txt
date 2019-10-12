@@ -1,0 +1,1798 @@
+传输层笔记
+tcp_set_state(struct sock *sk,int state)
+{
+    如果sk->state==TCP_ESTABLISHED
+	  tcp_statistics.TcpCurrEstab--;
+	如果新的state为TCP_ESTABLISHED以及sk->state状态是TCP_SYN_RECV
+       唤醒master_sleetc_wakeup
+     sk->state=state//sk->state设置新的state
+	 判断若开始减了tcp_statistics.TcpCurrEstab++
+	 
+}
+
+tcp窗口大小选择函数
+int  tcp_select_window(struct sock*sk)
+{     
+	 new_window如果sk->window_clamp不为0则取其sk->prot->rspace(sk)两者小值
+	 if(new_windo<min(sk->mss,MAX_WINDOW/2)||new_window<sk->window)
+             return(sk->window)
+     return(new_window)；			 
+}
+
+
+
+完成套接字建立连接工作
+struct sk_buff*tcp_find_established(struct sock*s)
+{
+    p=skb_peek(s->recvive_queue);
+	while循环查找p->sk->state==TCP_ESTABLISHED
+	       return p;
+	return NULL;	   	
+}
+
+找一个skb对应的sk是esatblished的skb
+struct sk_buff*tcp_dequeue_established(struct sock*s)
+{
+     skb=tcp_find_established(s);
+	 如果skb!=NULL skb_unlink(skb);
+	 return skb;
+}
+
+
+
+accept传输层实现
+struct sock*tcp_accept(struct sock*sk,int flags )
+{
+   判断sk->state必须为TCP_LISTEN否则报错返回
+   sk->inuse=1；
+   while(skb==tcp_dequeue_established(sk))
+   {
+       可中断睡眠在sk->sleep；
+   }
+   newsk=skb->sk;
+   kfree_skb(skb，FREE_READ);
+   sk->ack_backlog--;
+   return newsk;//返回是新的sock
+}
+
+
+关闭待连接的套接字（收到对端发送的SYN但是没有调用accept接受）
+void tcp_close_pending(struct sock*sk)
+{
+   while(skb=skb_dequeue(&sk->recvive_queue)!=NULL)
+   {
+      skb->sk->dead=1;
+	  tcp_close(skb->skb,0);
+	  kfree_skb(skb,FREE_READ);
+   }
+   return ;
+}
+
+设置本地socket进入TIME_WAIT状态，并设置定时器
+void tcp_time_wait(struct sock*sk)
+{
+   tcp_set_state(sk,TCP_TIME_WAIT);
+   设置sk->shutdown为SHUTDOWEN_MASK
+   如果未设置sk->dead标志位则sk->state_change(sk);
+   reset_msl_timer(sk,TIME_CLOSE,TCP_TIMEWAIT_LEN);
+}
+
+tcp_do_retransimit处理具体的重传工作
+reset_msl_timer重新设置超时定时器
+tcp_retransmit_time使用指数退避算法计算重传间隔时间
+调用reset_xmit_timer重新设置定时器，调用tcp_do_restransimit做具体的重传工作
+tcp_retransmit调用tcp_retransmit_time完成重传工作，采用算法重传以及判断多久放弃
+tcp_write_timeout处理超时重传对本地的影响限制重传是次数
+retransmit_timer超时重传处理总入口函数
+
+具体重传
+void tcp_do_retransimit(struct sock*sk,int all)
+{
+
+   取下sk->send_head的while循环skb调用dev_queue_xmit(skb,dev,sk->priority);
+   sk->prot->retransmits++;ct++;
+   if(!all)
+      break;跳出while循环表示一次重传一个数据包
+	拥塞判断
+    if(ct>=sk->cong_window)//(ct表示重传包数while循环里++)	
+     break、、跳出while循环。
+	 //找到下一个skb
+	 skb=skb->link3;//注意link3用于send_head队列数据包的相互连接
+	 send_head指向队列头，send_tail指向队列尾
+}
+
+
+sk->retransmit_timer用于普通tcp包超时重传
+重置定时器
+void reset_xmit_timer(struct sock*sk,int why,unsigned long when )
+{
+     删除原有定时器sk->retransmit_timer
+	 sk->ip_xmit_timeout=why
+	 使用when更新定时器时间添加新的定时器sk->retransmit_timer
+}
+
+
+
+void tcp_retransmit_time(struct sock*sk,int all)
+{
+   //调用重传函数
+   tcp_do_retransimit(sk,all);
+   //更新计数
+   sk->retransmits++;
+   sk->backoff++;
+   sk->rto=min(sk->rto<<1,120*HZ);
+   //更新定时器
+   reset_xmit_timer(sk,TIME_WRITE,sk->rto);   
+}
+
+
+void retransmit_timer(unsigned long data)
+{
+   sk=(struct sock*)data;
+   why=sk->ip_xmit_timeout;
+   ssk->inuse=1;
+   switch(why)
+   {
+        case TIME_PROBE0:
+	            tcp_send_probe0(sk);
+				tcp_write_timeout(sk);//判定重传次数决定是否取消定时器
+				break;
+	    case  TIME_WRITE:
+                skb=sk->send_head;
+				判断若未超时reset_xmit_timer(sk,TIME_WRITE,skb->when+sk->rto-jiffies)
+				sk->prot->retransmit(sk,0);
+				tcp_write_timeout(sk);
+			 	brewk; 
+		case TIME_KEEPOPEN:
+                reset_xmit_timer(sk,TIME_KEEPOPEN,TCP_TIMEOU_LEN);
+				sk->retransmit++;
+				tcp_write_timeout(sk);
+				break;
+		default:		
+		        break;
+	
+    release_sock(sk);	
+   } 
+}
+
+
+void tcp_err(int err,unsigned char*header,unsigned long daddr
+unsigned long saddr,struct inet_protocol*protocol)
+{
+  若错误号小于0表示错误严重，将错误号存储于sock->err,调用sk->error_report(sk);
+  若是源端节制错误 ，则减少拥塞窗口sk->cong_window--
+  若错误致命，则将错误存储起来不立刻通知用户，用户后续操作会被通知
+  若错误发生在建联过程中，则终止连接，即使通知用户
+   sk->state==TCP_SYN_SENT
+   tcp_set_state(sk,TCP_CLOSE);
+   sk->error_report(sk);
+
+}
+
+当前用户可读数据量探测
+int tcp_readable(struct sock*sk)
+{
+   skb=skb_peek(&sk->recvive_queue);
+   counted=sk->copied->seq;
+   while(skb!=sk->recvive_queue)
+   {
+        
+        if(before(counted,skb->h.th->seq))(在他之前就是出现了断裂，正常counted>=skb->h.th->seq)
+	        break;
+		sum=skb->len-(counted-skb->h.th->seq);
+        if(skb->h.th->syn)
+             sum++;
+        if(sum>0)
+        {
+		   amount+=sum;
+		   if(skb->h.th->syn)
+		    amount--;
+			counted+=sum;
+		}
+        if(skb->h.th->urg)
+             amount--;
+        skb=skb->next;			 
+   }
+    return (amount);//返回总共顺序可读数据
+}
+
+检测是否存在连接请求
+int  tcp_listen_select(struct sock *sk,int sel_type,select_table *wait )
+{
+     。。。
+	 判断sel_type==SEL_IN{
+     调用retval=(tcp_find_established(sk)!=NULL)
+     if(!retval)//当找不到established 的包则retval为0也就是找不到睡眠
+          select_wait(&master_select_wakeup,wait);
+     return retval;
+	 。。。}
+    return 0;	 
+}
+
+select的tcp实现
+int tcp_select(struct sock*sk,int sel_type,select_table*wait)
+{
+   //判断sk->state是否是TCP_LISTEN是则return tcp_listen_select
+    否则sel_type:(是非监听套接字)
+	       case SEL_IN:
+		            判断是否出错，出错则return 1
+				    判断sk->state==TCP_SYN_SENT||TCP_SYN_RECV
+				        break;
+					sk->shutdown包含RCV_SHUTDOWN
+                        return 1;//对端套接字关闭了不存在数据过来了
+                    sk->acked_seq==sk->copied_seq
+                         break;	//acked_seq表示希望接受的下个序列号如果==copied_seq
+                                   表示没有多余的未读数据。						 
+				   sk->usrg_seq!=sk->copied_seq||sk->acked_seq!=sk->copied_seq+1（有数据未读）
+				   sk->urginline||!sk->urg_data//存在未读紧急数据
+				   return 1;
+				   break；//继续睡眠
+			case SEL_OUT：
+                sk->shudtwon包含SEND_SHUTDOWN
+                     return 0;
+                sk->state==TCP_SYN_SENT||TCP_SYN_RECV
+                     break;//继续睡眠
+				sk->prot->wspace(sk)<sk->mtu+128+sk->prot->max_header
+                      //空间不足
+                      break;//继续睡眠
+                return 1；
+            case  SEL_EX:
+                sk->err||sj->usr_data
+                        return 1;//出错或者存在紧急数据返回
+                break;
+            }
+            select_wait(sk->sleep,wait);
+            return 0;			
+}
+
+ioctl实现
+int tcp_ioctl(struct sock*sk,int cmd,unsigned long arg)
+{
+   .....
+
+}
+
+tcp首部及其负载校验和
+unsigned  short tcp_check(struct tcphdr*th,int len,unsigned long saddr,unsigned long daddr)
+{
+   。。。。。
+}
+
+负责将数据包从传输层发送到网络层
+void tcp_send_skb(struct sock*sk,struct sk_buff*skb)
+{
+   //获取数据包的tcp以及数据长度
+    size=skb->len-((unsigned char*)th-skb->data);
+	大小检查size<sizeof(struct tcpohdr)||size>skb->len 
+	   出错return ;
+	size==tcp结构大小
+       效验th->syn&&th->fin
+          都没置位则出错返回 return；
+	//更新skb->h.seq,纯数据长度
+    skb->h.seq=ntol(th->seq)+size-4*th->doff;
+	if(after(skb->h.seq,sk->window_seq)||sk->retransmit&&sk->xmit_timeout==TIME_WRITE
+	      || sk->packets_out>=sk->cong_window)
+    //这个数据包大小排到窗口之外或者存在超时重传或者未确认数据包超过限定	
+    //将skb挂在sk->write_queue
+    skb_queue_tail(&sk->write_queue,skb); 
+    if(before(sk->window_seq,sk->write_queue.next->h.seq)&&
+	   sk->send_head==NULL&&sk->ack_backlog==0)	
+	 //如果窗口在待发送数据包之前且没有对端未确认的数据包以及对端来本地未应答的数据包
+	  则设置探测定时器
+	  reset_xmit_timer(sk,TIME_PROBE0,sk->rto);
+    else
+	//未超过窗口大小
+	    th->ack_seq=ntol(sk->acked_seq);
+	    th_window=ntos(tcp_select_window(sk));
+	    tcp_send_check(th,sk-saddr,sk->daddr,size,sk);
+	    sk->sent_seq=sk->write_seq;//更新已发送序列为写序列
+	    sk->prot->queue_xmit(sk,skb->dev,skb,0);//发送数据包
+	    reset_xmit_timer(sk,TIMER_WRITE,sk->rto);//会在收到ack时删除
+		
+}
+
+
+partial操作函数，partial用于聚合数据的其只缓存一个数据包当数据发送的小于mtu就会聚合等待一会
+
+//取下sk缓存的partial数据包
+struct  sk_buff*tcp_dequeue_partial(struct sock*sk)
+{
+    skb=sk->partial;
+	if(skb)
+	    sk->partial=NULL;
+		del_timer(&sk->partial_timer);
+	return skb;	
+}
+
+发送partial数据包
+void tcp_send_partial(struct sock*sk)
+{
+    if(sk==NULL)
+	    return ;
+	while skb=tcp_dequeue_partial(sk)!=NULL//取下数据包	
+	   tcp_send_skb(sk,skb);//发送出去
+}
+
+创建partial
+void tcp_enqueue_partial(struct sk_buff*skb,struct sock*sk )
+{
+   tmp=sk->partial;
+   若存在sk->partial则删定时器
+     del_timer(&sk->partial_timer);
+	sk->partial=skb;
+	初始化定时器
+    init_timer(&sk->partial_timer);
+    设置定时器参数为新的skb参数(超时为1秒)
+	add_timer(&sk->partial_timer);
+	如果tmp非空
+	  tcp_send_skb(sk,tmp);
+}
+
+发送一个ack数据包
+void tcp_send_ack(unsigned long sequence,unsigned long ack,struct sock*sk,
+              struct tcphdr*th,unsigned long daddr)
+{
+    if(sk->zapped)//收到rst数据包会置zapped位
+	    return ;
+	buff=sk->prot->wmalloc(sk,MAX_ACK_SIZE,1,GFP_ATOMIC)
+   	如果buff==NULL//没写内存了
+	    sk->ack_backlog++；//未确认数据包个数++；
+	  
+        if(sk->ip_xmit_timeout!=TIME_WRITE&&tcp_connect(sk->state))//存疑
+        {
+	        reset_xmit_timer(sk,TIME_WRITE,HZ);
+	    }	
+    buff!=NULL
+	     buff->len=tcp头部长度
+		 buff->sk=sk;
+		 buff->localroute=sk->localroute;
+		 tl=(struct tcphdr*)buff->data;
+		 //创建IP头
+		 tmp=sk->prot->build_header(buff,sk->saddr,daddr,&dev,
+		       IPPPROTO_TCP,sk->opt,MAX_ACK_SIZE,SK->IP_TOS,SK->IP_TTL);
+		 buff->len+=tmp;	   
+		 memcpy(tl,th,sizeof(*tl));
+         tl->dest=th->source;
+         tl->source=th->dest;
+         tl->seq=ntol(sequence);
+         tl->ack=1;
+         sk->window=tcp_select_window(sk);
+         tl->window=ntol(sk->window);
+         tl->resl=0;
+		 tl->res2=0;
+		 tl->rst=0;
+		 tl->urg=0;
+		 tl->syn=0;
+		 tl->psh=0;
+		 tl->fin=0;
+		 若ack==sk->acked_seq;应答序列号等于本地希望接收的序列号则说明这个ack是最新的ack
+		 
+		    sk->ack_backlog=0;//未应答数据包初始化为0
+			sk->bytes_rcv=0;
+			sk->ack_timed=0;
+			if(sk->send_head==NULL&&skb_peek(&sk->write_queue)
+			   &&sk->ip_xmit_timeout==TIME_WRITE)
+			//未应答数据包为0以及未待发送为0以及设置了超时重传定时器
+			   if（sk->keepopen）
+			     rset_xmit_timer(sk,TIMER_KEEPOPEN,TCP_TIMEOUT_LEN);
+				 else
+				   delete_timer(sk);
+		tl->ack_seq=ntol(ack);
+        tl->doff=sizeof(*tl)/4;
+        tcp_send_check();
+        sk->prot->queue_xmit(sk,dev,buff,1);		
+}
+tcp首部创建
+
+int  tcp_build_header(struct tcphdr* th,struct sock*sk,int push )
+{
+   //拷贝sk->dummy_th到th地址上
+   。。。
+   //初始化th变量值
+   th->seq=htol(sk->write_seq);
+   th->psh=(push==0)?1:0;
+   th->doff=sizeof(*th)/4;
+   th->ack=1;
+   th->fin=0;
+   sk->ack_backlog=0;
+   sk->bytes_rcv=0;
+   sk->ack_timed=0;
+   th->ack_seq=htol(sk->acked_seq);
+   sk->window=tcp_select_window(sk);
+   th->window=htos(sk->window);
+   return (sizeof(*th));
+   
+}
+
+
+
+write实现
+int tcp_write(struct sock*sk,unsigned char*from
+     int len,int nonblock,unsigned flags)
+{
+    while(len>0)
+	{
+	    //判断是否是shutdown是则返回
+		sk->shutdown&SEND_SHUTDOWN
+		//判断不是TCP_ESTABLISHED以及不等于TCP_CLOSE_WAIT进入循环
+		 非TCP_SYN_SENT或者TTCP_SYN_RECV会返回
+		 是的话会根据noblock标志判断是否等待建立连接完成
+        //开始进行数据发送		 
+		 
+           第一个从tcp_dequeue_partial(sk)取下个数据包
+        	 //计算包头长度
+                hardlen=（(unsigned long）skb->h.th	-(unsigned long )skb->data)+sizeof(struct tcphdr);
+				//取len与数据包最大剩余载荷之间最小值
+                copy=min(sk->mss-(skb->len- hardlen),len);
+				从用户态地址拷贝copy长度数据
+		        skb->len+=copy;
+				from+=copy;
+				copied+=copy;
+				len-=copy;
+				sk->write_seq+=copy;
+				// skb载荷长度大于sk->mss则调用tcp_send_skb发送
+				if（（skb->len-hardlen）>=sk->mss||(flags&MSG_OOB)||!sk->packets_out）
+	                    tcp_send_skb(sk,skb);
+	            else 
+                     tcp_enqueue_partial(skb,sk);
+                continue;					 
+			
+
+
+			//partial为空
+			    copy=sk->window_seq-sk->write_seq;
+			    if(copy<=0||copy<(sk->max_windo>>1)||copy>sk->mss)
+			    copy=sk->mss;
+			    if(copy>len)
+                     copy=len;
+
+             	if(copy<sk->mss&&!(flags&MSG_OOB))
+                    skb=prot->wmalloc(sk,sk->mtu+128+prot->max_header,0,GFP_KERNEL)；
+                else
+                    skb=prot->wmalloc(sk,copy+prot->max_header,0,GFP_KERNEL); 				
+                //skb分配失败则根据noblock标志是否睡眠等待继续重新分配
+                。。。
+				//skb分配成功
+                skb->len=0;
+                skb->sk=sk;
+                skb->free=0;
+                skb->localroute=sk->localroute|flags&MSG_DONTROUTE；
+                buff=skb->data;
+ 				tmp=prot->build_header(...);
+				skb->len+=tmp;
+				skb->dev=dev;
+				buff+=tmp;
+				skb->h.th=(struct tcphdr*)buff;
+				tmp=tcp_build_header((struct tcphdr*)buff,sk,len-copy);
+	            skb->len+=tmp;
+				//从用户态拷贝copy长度数据
+				from+=copy;
+				copied+=copy;
+				len-=copy;
+				skb->len+=copy;
+				skb->free=0;
+				sk->write_seq+=copy;
+				//根据copy<sk->mss&&!(flags&MSG_OOB)
+				//判断是否缓存数据包tcp_enqueue_partial(skb,sk)&&continue;
+				//否则
+				tcp_send_skb(sk,skb);
+				继续len>0的while循环
+	}
+	若sk->partial存在且!sk->packets_out	非0或者数据包在窗口内
+	before（sk->write_seq,sk->window_seq）;
+       tcp_send_partial(sk);
+	   release_sock(sk);
+	   return(copied);
+
+}	 
+
+
+int tcp_sendto(struct sock*sk,unsigned char *from
+   int len,int noblock,unsigned flags,struct sockaddr_in*addr,int addr_len)
+{
+    ...效验入参
+	调用tcp_write(sk,from,len,noblock,flags);
+}
+
+
+
+发送ack数据包让远端进行数据包发送或者接收
+也就是发送个ack数据包
+void tcp_read_wakeup(struct sock*sk)
+{
+   判断sk->ack_backlog是不是非空若是则说明没有未应答数据包
+   获取buff=sk->prot->wmalloc(...)
+   初始化 buff->len=sizeof(struct tcphdr),buff->sk=sk,buff->localroute=sk->localroute;
+   构造ip头tmp=sk->prot->build_header(buff,...)
+   buff->len+=tmp;
+   tl=(struct tcphdr*)(buff->data+tmp);
+   memcpy(tl,(void*)&sk->dummy_th,sizeof(*tl));
+   初始化tl值
+   tl->seq=htonl(sk->sent_seq); 
+   tl->ack=1;
+   tl->res1=0;
+   tl->res2=0;
+   tl->rst=0;
+   tl->urg=0;
+   tl->syn=0;
+   tl->psh=0;
+   sk->ack_backlog=0;
+   sk->bytes_rcv=0;
+   sk->window=tcp_select_window(sk);
+   tl->window=ntos(sk->window);
+   tl->ack_seq=ntohl(sk->acked_seq);
+   tl->doff=sizeof(*tl)/4;
+   tcp_send_check(...)
+   sk->prot->queue_xmit(sk,dev,buff,1);
+   tcp_statistics.TcpOutSegs++;  
+}
+
+tcp_write_wakeup与tcp_read_wakeup区别是tl->seq=htonl(sk->send_seq-1);
+tcp_read_wakeup发送未应答数据包而tcp_write_wakeup发送已应答的数据包。
+tcp_write_wakeup用于probe定时器超时时会被调用。
+
+清除已被读取完的数据包
+void cleanup_rbuf(struct sock*sk)
+{
+    left=sk->prot->rspace(sk);
+	取包判断是否已经读取完成
+	while(skb=skb_peek(&sk->receive_queue)!=NULL))
+	{
+	   是否使用中的标志是!skb->used(读取过了会设置此标志)||skb->users (skb使用者为0))
+	    如果已经被读取无人使用则kfree_skb(skb...)			   
+	}
+	if(rspace=sk->prot->rspace(sk)!=left)(看看是否释放了部分数据包空间)
+	{
+	    sk->ack_backlog++;(用于发送ack数据包，因为tcp_read_wakeup会判断)
+		if(rspace>(sk->window-sk->bytes_rcv+sk->mtu))判断是否可以容纳一个mtu数据包
+		{
+		    tcp_read_wakeup(sk);
+		}
+		else  不够mtu大
+		{
+		   was_active=del_timer(&sk->retransmit_timer);
+		   if(!was_acitve||TCP_ACK_TIME<sk->expires.time)定时器未到期
+		   {
+		       reset_xmit_timer(sk,TIME_WRITE,TCP_ACK_TIME);
+		   }
+		    else
+			  add_timer(&sk->retransmit_timer);
+		}
+		 		
+	} 
+}
+
+
+读取紧急数据函数
+int tcp_read_urg(struct sock*sk,int noblock,unsigned char *to,int len,unsigned flags )
+{
+   sk状态判断
+   if(sk->urg_data&URG_VALID)
+   {
+       c=sk->urg_data;
+	   put_fs_type(c,to);
+	   relsease_sock(sk);
+	   return 1;
+   }
+   release_sock(sk);
+}
+
+
+read  tcp层实现
+int tcp_read(struct sock*sk,unsigned char*to,int len,int noblock,unsigned flags)
+{
+   排除监听套接字sk->state==TCP_LISTEN return -ENOTCONN;
+   判断是否存在紧急数据flags&MSG_OOB 则调用tcp_read_urg读取；
+   seq=&sk->copied_seq;
+   将当前进程加入sk->sleep睡眠队列中
+   sk->inuse=1;
+   while(len>0)
+   {
+        if(copied&&ssk->urg_data&&sk->urg_seq==&seq)
+	      break;读取过程中遇到紧急数据则停止读取
+		skb=skb_peek(&sk->receive_queue)
+		do
+        {
+		    if(!skb) break;没有数据包了停止读取。
+			if(before(*seq,skb->h.th->seq))	
+			   break;出现序列不一致理论上seq==skb->h.th->seq
+			offset=*seq-skb->h.th->seq;//部分重叠
+            if(skb->h.th->syn)
+                  offset--;
+            if(offset<skb->len)
+                 goto found_ok_skb;//找到数据包
+            if(skb->h.th->fin)
+                 goto	found_fin_ok;//发现fin数据包
+            skb->used=1;
+            skb=skb->next;//如果没找到说明目前数据包被读取了继续下一个			
+		}while(skb!=&sk->receive_queue);	
+        if(copied)//走到这里说明之前没有跳转也就是没有数据可读
+           break;
+        判断sk是否出错，出错则break；
+		如果sk->state==TCP_CLOSE说明sk关闭则出错返回
+		if(noblock)  break;
+		cleanup_rbuf(sk);
+		relsease_sock(sk);
+		schedule();//让出cpu睡眠。
+		处理信号唤醒的情况。
+		//tcp_data会将数据包挂在receive_queue队列加入，加入一个数据包后调用sock->data_ready指针函数def_callback2唤醒睡眠在sk->sleep上的进程
+		continent；//这里说明被唤醒		
+   
+found_ok_skb:
+   skb->users++;
+   used=skb->len-offset;判断出有用的数据。
+   if(len<used) used=len;
+   判断是否存在 紧急数据处理紧急数据
+   *seq+=used;
+   //向用户空间拷贝数据
+   memcpy_togfs(to,(unsigned char*)skb->h.th+skb->h.th->doff*4+offset;used);
+   copied+=used;
+   len-=used;
+   to+=used;
+   skb->users--;
+   如果紧急数据已经被处理则清楚skb->urg_data=0;
+   if(used+offset<skb->len)//数据包未被完全读取继续下一次循环则会跳出len大循环。
+     continue;
+   //下面是数据包被读取完了的处理
+    if(skb->h.th->fin)
+      goto found_fin_ok;	
+	//说明不是fin数据包则是普通数据包
+    //设置skb被读取位
+    skb->used=1;
+    continue;//继续下一次循环
+
+found_fin_ok:	
+      ++*seq;
+	  skb->used=1;
+	  sk->shutdown|=RCV_SHUTDOWN;
+	  break；//跳出循环
+	  
+   }
+   cleanup_rbuf(sk);
+   release_sock(sk);
+   return copied;
+}
+
+关闭套接字时调用tcp_close_state决定是否进行发送fin操作
+int tcp_close_state(struct sock*sk,int dead)
+{
+    switch(sk->state)
+	{
+	    case TCP_SYN_SENT:
+	            break;
+		case  TCP_SYN_RECV：
+        case  TCP_established:
+              ns=TCP_FIN_WAIT1;
+			  send_fin=1;
+			  break;
+        case  TCP_FIN_WAIT1:
+        case  TCP_FIN_WAIT2:
+		case  TCP_CLOSING:
+              ns=sk->state;
+              break;	
+        case  TCP_CLOSE:
+        case  TCP_LISTEN:
+               break;
+        case  TCP_CLOSE_WAIT:			   
+		      ns=TCP_LAST_ACK;
+			  send_fin=1;
+	}   
+	tcp_set_state(sk,ns);
+	if(dead&&ns==TCP_FIN_WAIT2)
+	{
+	   设置定时器操作
+	}  
+	return send_fin;
+}
+
+
+发送fin数据包关闭发送通道
+
+void  tcp_send_fin(struct sock *sk)
+{
+   //申请个skb空间
+   buff=prot->wmalloc(...)
+   sk->inuse=1;
+   //初始化buff
+   buff->sk=sk;
+   buff->len=sizeof(*tl);
+   buff->localroute=sk->localroute;
+   tl=(struct tcphdr*)buff->data;
+   //构造ip头
+   tmp=prot->build_header(...)
+   tl=(struct tcphdr*)((char*)tl+tmp);
+   buff->len+=tmp;
+   buff->dev=dev;
+   memcpy(tl,th,sizeof(*tl));
+   //使用write-seq因为fin需要在已写数据之后发送
+   tl->seq=ntol(sk->write_seq);
+   sk->write_seq++;
+   buff->h.seq=sk->write_seq;
+   tl->ack=1;
+   tl->ack_seq=ntol(sk->acked_seq);
+   tl->window=ntohs(sk->window=tcp_select_window(sk));
+   tl->fin=1;
+   tl->rst=0;
+   tl->doff=sizeof(*tl)/4;
+   tcp_send_check(...);
+   //判断write_seq是否存在数据有则排队
+   if(skb_peek(&sk->writez_queue)!=NULL)
+   {
+      buff->free=0;
+	  ...
+	  skb_queue_tail(&sk->write_queue);
+   }
+   else
+   {
+     //更新sent_seq     
+	 sk->sent_seq=sk->write_seq;
+	 sk->prot->queue_xmit(sk,dev,buff,0);
+	 reset_xmit_timer(sk,TIME_WRITE,sk->rto);
+   }  
+}
+
+
+shutdown 函数TCP实现
+void tcp_shutdown(struct sock*sk,int how)
+{
+    //以下状态不需要操作直接返回
+   if(sk->state==TCP_FIN_WAIT1||
+     sk->state==TCP_FIN_WAIT2)||
+	 sk->state==TCP_CLOSING||
+	 sk->state==TCP_LAST_ACK||
+	 sk->state==TCP_TIME_WAIT||
+	 sk->state==TCP_CLOSE||
+	 sk->state==TCP_LISTEN)
+	 return ;
+	 sk->shutdown|=SEND_SHUTDOWN;
+	 //若存在未发送的partial则发送
+	 if(sk->partial)
+	    tcp_send_partial(sk);
+	 if(tcp_close_state(sk,0))
+        tcp_send_fin(sk);
+     release_sock(sk);
+}	 
+
+
+
+recvfrom的TCP实现
+int tcp_recvfrom(struct sock*sock,unsigned char*to  
+                 int to_len,int noblock,unsigned flags
+				  struct sockaddr_in*addr,int addr_len)
+{
+     if(addr_len)
+	   *addr_len=sizeof(*addr);
+	  result=tcp_read(sk,to,to_len,noblock,flagsd) ;
+	  if(result<0)
+	      return result;
+	  if(addr)
+      {
+	     addr->sin_family=AF_INET;
+		 addr->sin_port=sk->dummy_th.dest;
+		 addr->sin_addr.s_addr=sk->daddr;
+	  }	  
+      return result;
+}				  
+
+
+
+向远端发送rst数据包
+
+tcp_reset(unsigned long saddr,unsigned long daddr ,struct tcphdr*th  
+          struct proto*prot,struct options*opt,struct device*dev, int tos  )
+		  {
+		     判断是否已经接受了rst，是否被置位，是则return返回
+			 buff=prot->wmalloc(...)
+			 初始化skb基础数据
+			 buff->len=sizeof(*tl);
+			 buff->sk=NULL;
+			 buff->dev=dev;
+			 buff->localroute=0;
+			 tl=（struct tcphdr*）buff->data;
+			 //构造ip头
+			 tmp=prot->build_header(buff,saddr,daddr,&ndev,IPPROTO_TCP,opt,,sizoef(struct tcphdr),tos,ttl)
+			 tl=(struct tcphdr*)((char*)tl+tmp);
+			 buff->len+=tmp;
+			 //拷贝对方的th
+			 memcpy(tl,th,sizeof(*tl));
+			 //初始化tl数据
+			 tl->dest=th->source;
+			 tl->source=th->dest;
+			 tl->rst=1；
+			 tl->window=0;
+			 //如果收到时ack出发rst
+			 //则将seq=对端设置的确认序列号否则会引起对端丢弃
+			 if(th->ack)
+			 {
+			    tl->ack=0;
+				tl->seq=th->ack_seq;
+				tl->ack_seq=0;
+			 }
+			 else//发送个ack+rst//因为tcp连接一旦建立所有交互数据包ack都会置位
+			 {                   //不是ack则是syn
+			    tl->ack=1
+				//判断是否是syn是则tl->ack_seq=htol(th->seq)//+th->len;
+				tl->ack_seq=htol(th->seq+1);//th->len
+				tl->seq=0;
+	
+			 }
+			 //初始化剩余数据
+			 tl->syn=0;
+			 tl->urg=0;
+			 tl->fin=0;
+			 tl->psh=0;
+			 tl->doff=sizeof(*tl)/4;
+			 tcp_send_check(...);
+			 prot->queue_xmit(...);
+			 //计数
+}
+
+tcp选项处理函数		  
+void tcp_options(...)
+{
+  ...
+}
+
+unsigned long default_mask(unsigned long dst)
+{
+   ....
+   根据网络号判断地址类型    
+}
+
+//初始化seq
+unsigned long tcp_init_seq(void)
+{
+   struct timeval tv;
+   do_gettimeofday(&tv);
+   return tv.tv_usec+tv.tv_sec*1000000;   
+}
+
+
+处理tcp连接请求//daddr\saddr从远端角度看，daddr是本地地址
+被tcp_rcv调用处理syn请求连接数据包
+void tcp_conn_request(struct sock*sk,struct sk_buff*skb,
+                      unsigned long daddr,unsigned long saddr,struct options*opt,struct device*dev,unsigned long seq)
+{
+	判断sk->dead置位则tcp_rst(...)
+	没有置位则sk->data_ready(sk,0)唤醒睡眠在此套接字的进程
+	//继续下一步
+	判断目前sk->ack_backlog是不是大于sk->max_ack_backlog
+	//是则释放数据包返回
+	//kamlloc获取新的mewsk
+	memcpy(newsk,sk,sizeof(newsk));
+	//初始化newsk
+	skb_queue_head_init(&newsk->write_queue);
+	skb_queue_head_init(&newsk->receiver_queue);
+	newsk->send_head=NULL;
+	newsk->send_tail=NULL;
+	skb_queue_head_init(&newsk->back_log);
+	newsk->rtt=0;
+	newsk->rto=TCP_TIMEOUT_INIT;
+	newsk->mdev=0;
+	newsk->max_window=0;
+	newsk->cong_window=1;
+	newsk->cong_count=0;
+	newsk->ssthresh=0;
+	newsk->backoff=0;
+	newsk->blog=0;
+	newsk->initr=0;
+	newsk->proc=0;
+	newsk->done=0;
+	newsk->partial=NULL;
+	newsk->pair=0;
+	newsk->wmem_alloc=0;
+	newsk->rmem_alloc=0;
+	newsk->localroute=sk->localroute;
+	newsk->max_unacked=MAX_WINDOW-TCP_WINDOW_DIFF;
+	newsk->err=0;
+	newsk->shutdown=0;
+	newsk->ack_backlog=0;
+	//初始化希望接受到的下一个字节序列号
+	newsk->acked_seq=skb->h.th->seq+1;
+	newsk->copied_seq=skb->h.th->seq=1；
+	newsk->fin_seq=skb->h.th->seq;
+	//初始化sk状态为TCP_SYN_RECV；
+	newsk->state=TCP_SYN_RECV；
+	//初始化
+	newsk->timeout=0;
+	newsk->ip_xmit_timeout=0;
+	//初始化seq
+	newsk->write_seq=seq;
+	newsk->rcv_ack_seq=newsk->write_seq;
+	nerwsk->urg_data=0;
+	newsk->retransmits=0;
+	newsk->linger=0;
+	newsk->destroy=0;
+	init_timer(&newsk->timer);
+	newsk->timer.data=(unsigned long )newsk;
+	newsk->timer.function=&net_timer;
+	init_timer(&newsk->retransmit_timer);//重发定时器
+	newsk->retransmit_timer.data=(unsigned long )data;
+	newsk->retransmit_timer.function=&retransmit_timer;
+	newsk->dummy_th.source=skb->h.th->dest;
+	newsk->dummy.th.dest=skb->h.th->source;
+	//daddr是本地地址saddr是发送的端地址
+	newsk->daddr=saddr;
+	newsk->saddr=daddr;
+	初始化newsk->dummy.th里的值
+	....
+	newsk->acked_seq=skb->h.th->seq+1;
+    newsk->copied_seq=skb->h.th->seq+1;
+	newsk->socket=NULL;
+	newsk->ip_ttl=sk->ip_ttl;
+	newsk->ip_tos=skb->ip_hdr->tos;
+	rt=ip_rt_route(saddr,NULL,NULL);
+	。。。
+	tcp_options(newsk,skb->h.th);
+    分配个skb
+	buff=newsk->prot->wmalloc(...)
+	buff->len=sizeof(struct tcphdr)+4;
+	buff->sk=newsk;
+	buff->localroute=newsk->localroute;
+	tl=(struct tcphdr*)buff->data;
+	构造ip头
+	tmp=sk->prot->build_header(...)
+	buff->len+=tmp;
+	tl=(struct tcphdr*)((char*)tl+data);
+	buff->h.seq=newsk->write_seq;
+	初始化buff里的tl值
+	。。。
+	tl->ack=1;
+	...
+	tl->syn=1;
+	...
+	tcp_send_check(...);
+	newsk->prot->queue_xmit(...)
+	reset_xmit_timer(newsk,TIME_WRITE,TCP_TIMEOUT_INIT);
+	skb->sk=newsk;
+	sk->rmem_alloc-=skb->mem_len;
+	newsk->rmem_alloc+=skb->mem_len;
+	skb_queue_tail(&sk->receive_queue,skb);
+	sk->ack_backlog++;
+	release_sock)(newsk);
+	计数
+	//分配个newsk发送个ack+syn					  
+}
+
+close的tcp层时实现
+void tcp_close(struct sock*sk,int timeout)
+{
+   //如果是监听套接字
+    {
+	   //设置套接字状态为close
+	   tcp_set_state(sk,TCP_CLOSE);
+	   //tcp_close_pending会释放
+	   //receive_queue的数据包
+	   tcp_close_pending(sk)；
+	   release_sock(sk);
+	     return ;
+	}
+    sk->keepopen=1;
+    //设置sk->shutdown
+    sk->shutdown=SHUTDOWN_MASK;
+ 	if(!sk->dead)
+	     //def_callback1唤醒sk->sleep
+	    sk->satte_change(sk);
+	判断timeout==0则表示立即关闭进行如下步骤
+	{//释放skn->receive_queue数据包
+	while(skb=skb_dequeue(&sk->receive_queue!=NULL))
+	  kfree_skb(skb,FREE_READ);
+	//释放partial
+    if(sk->partial)
+        tcp_send_partial(sk);
+    }end of timeout
+    if（timeout）
+	//tcp_set_state设置sk->state状态
+	tcp_set_state(sk,TCP_CLOSE);（？不知道啥时候关闭）
+    else
+	  //tcp_close_state 根据sk->state决定是否发送fin数据包
+      if(tcp_close_state(sk,1)==1)
+          tcp_send_fin(sk);	  
+	release_sock(sk);
+}	
+
+处理write_queue队列数据包
+void tcp_write_xmit(struct sock*sk)
+{
+    if(sk->zapped)//zapped是在收到rst的时候置位的
+       return ;//若已收到rst则返回
+	while(skb=skb_peek(&sk->write_queue))!=NULL)&&
+          before(skb->h.seq,sk->window_seq+1)&&
+		  
+          (sk->retransmits==0||sk->ip_xmit_timeout!=TIME_WRITE||
+           before(skb->h.seq,sk->rcv_ack_seq+1))&&
+		   sk->packets_out<sk->cong_window)
+		   //判断sk->write_queue有数据且包数据包的序列号在窗口内
+		   //且没有重传数据包 或者 重传不是TIME_WRITE（没有普通重传）
+		   //数据序列号在已确认数据序列内以及未确认的数据包个数小于窗口
+		{
+		   if(before(skb->h.seq,sk->rcv_ack_seq+1))
+		     //表示已经发送的数据包,因为前面有个||会导致
+			 此项未检查
+			 {
+			    sk->retransmits=0;
+				kfree_skb(skb,FREE_WRITE);//发送过得数据包释放
+				if(!sk->dead)
+				    sk->write_space(sk);
+			 }
+		    else
+			{
+			    th->ack_seq=ntol(sk->acked_seq);
+				th->window=ntos(tcp_select_window)；
+				tcp_send_check(...);
+				sk->sent_seq=skb->h.seq;//更新sent_seq。
+				sk->prot->queue_xmit(sk,skb->dev,skb,skb->free);
+				reset_xmit_timer(sk,TIME_WRITE,sk->rto);
+			}
+		}   
+		   
+}
+
+处理ack数据包
+int tcp_ack(struct sock*sk,struct tcphdr*thj,unsigned long saddr,int len )
+{
+   if(sk->zapped)//rst收到被置位
+       return 1;
+	ack=ntohl(th->ack_seq);//更新ack=接受到ack_seq;
+	更新mss
+    if(sk->retransmits&&sk->ip_xmit_timeout==TIMER_KEEPOPEN)
+    //若重传次数不为0且当前重传处于保活
+        sk->retransmits=0;	
+	 if(after(ack,sk->sent_seq||before(ack,sk->rcv_ack_seq)))
+     {//说明ack数据包是发送的序列号之外的或者是已经收到的ack重复的
+	    if(after(ack,sk->sent_seq))
+		       return 0;//如果收到的序列号在sent_seq之外则直接返回
+       	if(sk->keepopen)//这里则说明是重复ack启动保活定时器或者什么也不做
+               if(sk->ip_xmit_timeout==TIMER_KEEPOPEN)		
+			      reset_xmit_timer（。。。）；
+				return 1；  				  
+	 }
+    if(len!=th->doff*4)//表示ack数据包长度大于tcp首部包含数据
+              flag|=1;
+	if(after(sk->window_seq,ack+ntohs(th->window)))
+    {// 窗口缩小，本地窗口序列号大于ack声明的
+	   skb2=send_head;
+	   flag|=4;
+	   设置本地窗口为ack中的大小
+	   sk->window_seq=ack+ntohs(th->window);
+	   对send_head中数据包遍历如果在窗口之外则重新挂在write_queue;
+	    
+	
+	}
+    else
+	//说明在窗口内则将数据包挂在send_tail
+	
+	如果sk->send_tail/head==NULL
+	 清除packets_out=0;
+	更新本地窗口sk->window_seq=ack+ntohs(th->window);
+	收到ack表示得到应答
+	更新sk->cong_window++;
+	更新已应答字段
+	sk->rcv_ack_seq=ack;
+	如果设置TIME_PROBE则说明这个是窗口通报ack
+	 更新rto；
+	while(sk->send_head!=NULL)
+    {
+	   如果send_head出现乱序打印告警不处理
+	   if(before(sk->send_head->h.seq,ack+1))
+	   {//注意h.seq是数据包最后一个字节序列号说明这个包已经被接收
+	      if(sk->retransmits)
+		  {
+		    //则表示进行了重发
+			flag|=2;
+			if(send_head重发队列不止一个数据包
+			   retransmits=1
+			否则就是一个
+               收到了ack则retransmits=0
+          }
+          更新packets_out;
+		   if(!sk->dead)
+		     sk->write_sapce(sk);唤醒进程可以写了
+		     oskb=sk->send_head;
+             没有重传更新rto以及backoff=0
+             释放oskb
+       } 		
+		else
+           break;
+    }end_while
+	if(skb_peek(&sk->write_queue)!=NULL))
+	{
+	     if(after(sk->window_seq+1,sk->write_queue.next->h.seq)&&
+		    (sk->retransmits==0||sk->ip_xmit_timeout!=TIMER_WRITE||before(sk->write_queue.next->h.seq,sk->rcv_ack_seq+1)
+			&& sk->packets_out<sk->cong_window)
+		//数据包序列号在窗口内且没有重传数据或者没有写重传或者数据包已经应答
+		 {//before(sk->write_queue.next->h.seq,sk->rcv_ack_seq+1是因为之前对send_head数据包回填到recvive_queue
+		     flag|=1;
+		     tcp_write_xmit(sk);//处理写队列
+		 }  
+		 else if(sk->window_seq,sk->write_queue.next->h.seq&&sen_head==NULL&&sk->ack_backlog==0&&sk->state!=TCP_TIME_WAIT)
+		 {
+		    窗口大小不够大以及重发队列为空套接字未关闭
+		    reset_xmit_timer(sk,TIME_PROBE,sk->rto);
+		 }
+		
+	}
+	else//对应是否有待发送的数据包
+	{
+	    switch(sk->state):
+		case TCP_TIME_WAIT:reset_msl_timer(sk,TIME_CLOSE,TCP_TIMEOUT_LEN);
+		       break;
+		case TCP_CLOSE:
+               break;
+        default:
+                if(sk->send_head||skb_peek(&sk->write_queue)!=NULL)||sk->ack_backlog)
+                {
+				     reset_xmit_timer(sk,TIME_WRITE,sk->rto);
+				}
+                else if(sk->keepopen)
+                {
+				      reset_xmit_timer(sk,TIMER_KEEPOPEN,TCP_TIMEOUT_LEN);
+				}
+                else   
+                {    del_timer(&sk->retransmit_timer);
+                     sk->ip_xmit_timeout=0;     
+                }				
+				break; 
+	}
+	if(sk->packets_out==0&&sk->partial!=NULL&&skb_peek(&sk->write_queue)==NULL&&sk->send_head==NULL)
+	{
+	    flag|=1
+		tcp_send_partial(sk);
+	}
+	
+    处理状态更新
+        if(sk->state==TCP_LAST_ACK)
+        {
+	       if(!sk->dead)
+		     sk->state_change(sk);
+		   if(sk->rcv_ack_seq==sk->write_seq) //发送了ack以及fin等待ack
+		   {
+		     flag|=1;
+		     tcp_set_state(sk,TCP_CLOSE);
+		     sk->shutdown=SHUTDOWN_MASK;
+		   }
+	    }	
+		if(sk->state==TCP_FIN_WAIT1)//发送个fin等待ack
+		{
+		   if(!sk->dead)
+		     sk->state_change(sk);
+			if(sk->rcv_ack_seq==sk->write_seq) 
+		{
+		   flag|=1;
+		   sk->shutdown=SHUTDOWN_MASK;
+		   tcp_set_state(sk,TCP_FIN_WAIT2);
+		}
+		if(sk->state==TCP_CLOSING)//同时关闭等待ack
+		{
+		   if(!sk->dead)
+		     sk->state_change(sk);
+			if(sk->rcv_ack_seq==sk->write_seq) 
+		{
+		   flag|=1;
+		   tcp_time_wait(sk);//tcp_set_state(sk,TCP_TIME_WAIT);
+                             // 设置sk->shutdown为SHUTDOWEN_MASK
+                             //如果未设置sk->dead标志位则sk->state_change(sk);
+                             //reset_msl_timer(sk,TIME_CLOSE,TCP_TIMEWAIT_LEN);
+		}
+		if(sk->state==TCP_SYN_RECV)//被动连接发送ack+syn等待ack
+		{
+		   tcp_set_state(sk,TCP_ESTABLISHED);
+           tcp_options(sk,th);
+           sk->dummy.th.dest=th.source;
+           sk->copied_seq=sk->acked_seq;  
+		   if(max_window=0){
+		      sk->max_window=32;
+			  sk->mss=min(sk->max_window,sk->mtu);}
+		
+		}
+	
+    if(((!flag)||（flag&4）&&sk->send_head!=NULL
+        &&(flag&2)&&sk->retransmits||(sk->send_head->when+sk->rto<jifftes)
+    {
+	   //!flag 表示一个单纯的没负载ack
+       //flag&4 窗口大小被缩减以及更新rto	   
+	   //send_head！=NULL表示ack未完全确认
+	   //主要作用是之前发送的数据包可能丢失主动重发
+   	   if(sk->send_head->when+sk->rto<jifftes)
+	       tcp_retransmit(sk,0);
+       else
+		{
+		   tcp_do_retransimts(sk,1);
+		   reset_xmit_timer(sk,TIME_WRITE,sk->rto);
+		}
+	}	
+    return 1;	
+      
+	}	
+  
+}
+
+处理fin数据包
+int tcp_fin(struct  sk_buff*skb,struct sock*sk,struct tcphdr*th)
+{
+   //更新fin_seq
+   sk->fin_seq=th->seq+skb->len+th->syn+th->fin;
+   //通知上层睡眠进程
+   if(!sk->dead)
+   {
+      sk->state_change(sk);
+	  sock_wake_aysnc(sk->socket,1);//强制唤醒因为存在wake_up之后检查继续睡眠的
+   }
+   switch（sk->state）:
+   {
+       case TCP_SYN_RECV:
+	   case TCP_SYN_SENT:
+       case TCP_ESTABLISHED:
+               tcp_set_state(sk,TCP_CLOSE_WAIT);//close_wait是esatblished状态收到fin
+			   if(th->rst)
+			        sk->shutdown=SHUTDOWN_MASK;
+			    break;
+		case TCP_CLOSE_WAIT:
+		case TCP_CLOSING:
+		        break;
+		case TCP_TIME_WAIT:
+              reset_msl_timer(sk,TIME_CLOSE,TCP_TIMEWAIT_LEN);//2ms时间防止最后的ack未到达对端的状态	
+		                                      //TCP_TIME_WAIT收到fin说明之前的ack丢失了设置但是双方都设置了2ms没啥影响
+			   return 0；								             
+			   
+		case TCP_FIN_WAIT1://发送fin等待ack却等来了对方fin说明同时关闭
+               if(sk->ip_xmit_timeout!=TIME_WRITE)
+                    reset_xmit_timer(sk,TIME_WRITE,sk->rto);
+               tcp_set_state(sk,TCP_CLOSING);
+               break;
+        case TCP_FIN_WAIT2://已发送了fin且已接收到了ack等待fin现在fin来了进入time_wait状态	
+               reset_msl_timer(sk,TIME_CLOSE,TCP_TIMEWAIT_LEN);	
+			   sk->shutdown=SHUTDOWN_MASK;
+			   tcp_set_state(sk,TCP_TIME_WAIT);
+			   break;
+	    case TCP_CLOSE:
+		       break;//已经close不管他
+		default :
+		       tcp_set_state(sk,TCP_LAST_ACK);
+               reset_msl_timer(sk,TIME_CLOSE,TCP_TIMEWAIT_LEN);//default对应的是last_ack以及listen，
+			                                               //listen不会收到这个数据包忽略。只有last ack,
+		}												   //等到ack却收到fin不管他。
+														   
+               return 0;			   
+ 根据sk->state状态收到fin更新对应的状态               		
+   }
+}
+
+
+处理带有用户数据包的tcp_data
+len表示tcp头及其负载
+int tcp_data(struct sk_buff*skb,struct sock*sk,unsigned long saddr,unsigned short len)
+{
+   ...
+   skb->len=len-(th->doff*4);//skb->len被更新为数据长度
+   sk->bytes_rcv+=skb->len;//更新sk->bytes_rcv是sk接收的总字节数
+   if（sk->len==0&&!skb->fin）
+   {//进来说明len长度为0且不是一个fin包
+      if(!skb->ack)
+	    tcp_send_ack(sk->sent_seq,sk->acked_seq,sk,th,saddr);
+	  kfree_skb(skb,FREE_READ);
+	  return 0;   
+   }
+   //处理是套接字被关闭的情况发来的数据
+   if(sk->shutdown&RCV_SHUTDOWN)
+   {
+      if(skb->len)//有数据
+	  {
+        new_seq=th->seq+skb->len+th->syn;
+		shut_seq=sk->acked_seq+1;//关闭数据包的序列号
+		if(after(new_seq,sshut_seq))//不是重传数据包
+		{
+		  if(sk->dead)//套接字已经关闭
+		  {
+		     sk->acked_seq=new_seq+th->fin;
+			 tcp_reset(sk->saddr,sk->daddr,skb->h.th,sk->prot,NULL,skb->dev,sk->ip_tos,sk->ip_ttl);
+			 tcp_set_state(sk,TCP_CLOSE);
+			 sk->err=EPIPE;//记录错误
+			 sk->shutdown=SHUTDOWN_MASK;
+			 kfree_skb(skb,FREE_READ);
+			 return 0;
+		  }
+		}
+	    
+	  }
+   }
+   
+   //下面插入数据
+   if(skb_peek(&sk->recvive_queue)==NULL))
+   {
+      //直接插入
+	  skb_queue_head(&sk->receive_queue,skb);
+	  skb1=NULL;
+   }
+   else
+   {
+       for(skb1=sk->receive_queue.prev;;skb1=skb1->prev)
+	   {
+	       if(th->seq==skb1->th.seq&&skb->len==skb1->len)
+		   {
+		       //重复数据包
+			   释放旧的插入新的
+			   dup_dumped=1;
+			   skb1=NULL;
+			   break;
+		   }
+		   if(after(th.seq+1,skb1->h.th->seq))
+		   {
+		      //查找到比当前数据包小的位置
+			  skb->apped(skb1,skb);
+			  break;//此时包括了重叠断裂以及连续
+		   }
+		   if(skb1==skb_peek(&sk->receiver_queue))
+		   {//从后面找到头了没找到
+		      skb_queue_head(&sk->receiver_queue,skb);
+			  break;
+		   }
+	   }
+   }end of else
+   //更新ack_seq
+   th->ack_seq=th->seq+skb->len;
+   if(th->syn)
+      th->ack_seq++;
+	if(before(acked_seq,sk->copied_seq))
+	{
+	    //已确认的序列号在拷贝的序列号之前出先不一致
+		sk->acked_seq=copied_seq;//效正
+	}
+	if(!dup_dumped&&(skb1==NULL||skb1->acked)||before(th.seq,sk->acked_seq+1))
+	{//没有重复数据包以及之前的包已经发送了ack或者新包的seq在已确认之前。
+	  if(before(th->seq,sk->acked_seq+1))
+	  {
+	     //当前数据包的seq在已确认之前出现重叠
+		 if(after(th->ack_seq,sk->aced_seq))
+		 {//出现部分重叠
+		    newwindow=sk->windwo-(th->ack_seq-sk->acked_seq);
+			if(newwindow<0)
+			  newwindow=0;
+			sk->window=newwindow;//更新窗口大小
+            sk->acked_seq=th->ack_seq;//更新已确认字节			
+		 }
+		 skb->acked=1;
+		 if(skb->h.th->fin)
+		    tcp_fin(skb,sk,skb->h.th);
+		for(skb2=skb->next;skb2!=sk->receiver_queue;skb2=skb2->next)//遍历skb后面数据包
+        {
+		   if(before(skb2->h.th->seq,sk->acked_seq+1))
+		   {
+			  if(after(skb2->h.th->ack_seq,sk->acked_seq))//这个数据包正好卡在确认好之间
+			  {
+			      newwindow=sk->windwo-(th->ack_seq-sk->acked_seq);
+			      if(newwindow<0)
+			        newwindow=0;
+			      sk->window=newwindow;//更新窗口大小
+                  sk->acked_seq=th->ack_seq;//更新已确认字节后面ack发送表示这些字节已经接受
+			  }
+			  skb2->acked=1;
+			  if(skb2->h.th->fin)
+			    tcp_fin(skb,sk,skb->h.th);
+			  sk->ack_backlog=sk->max_ack_backlog;//设置ack_abcklog为max
+		   }end of before
+		   else
+		   {break;}		   
+		}end of for	//终止循环可能出现断裂或者找到了after
+		
+		if(!sk->delay_acks||sk->ack_backlog>=sk->max_ack_backlog||sk->bytes_rcv>sk->max_unacked||th->fin)
+		{}
+		else
+		{
+		   sk->ack_backlog++;
+		   reset_xmit_timer(sk,TIMER_WRITE,TCP_ACK_TIME);
+		}
+		
+		
+	  }end before(th->seq,sk->acked_seq+1)
+	  
+	}
+	if(!acked_seq)
+	{
+	   //说明skb->h.th->seq不在sk->acked_seq+1之前即出现断裂
+	   while(sk->prot->rspace(sk)<sk->mtu)
+	   {
+	      。。。。
+		  从skb1=skb_peek(&sk->recvive_queue)开始删除
+		  if(skb1->acked)
+		  break;
+	   }
+	   tcp_send_ack(sk->sent_seq,sk->acked_seq,sk,th,saddr);//请求重传可能丢失的数据包
+	   sk->ack_backlog++;
+	   reset_xmit_timer(sk,TIMER_WRITE,TCP_ACK_TIME);
+	}
+	else
+	tcp_send_ack(sk->sent_ack,sk->acked_seq,sk,th,saddr);
+	
+	if（sk->dead）
+	{
+	   sk->data_ready(skk,0);
+	   
+	}
+	return 0;
+}
+
+
+紧急数据检查处理
+void tcp_check_urg(struct sock*sk,struct tcphdr* th)
+{
+    ...
+	获取ptr指针ptr=ntohs(th->urg_prt);
+	获取紧急数据的字节序if(ptr)ptr--;prt+=th.seq;//减一的目的是是指针指向紧急数据本身
+	if(after(sk->copied_seq,ptr))//已经拷贝的数据
+	  return ;
+	if(sk->urg_data&&!after(ptr,sk->urg_seq))//判断目前的紧急数据是新的不是则直接return
+      return ;   	 
+    。。。发送信号给对应的进程通知有紧急数据到达	
+    sk->urg_data=URG_NOTYET;
+	sk->urg_seq=ptr;	
+}
+紧急数据处理
+int tcp_urg(struct sock*sk,struct tcphdr*th,unsigned long saddr,unsigned short len)
+{
+    if(th->urg)//判断urg标志看看是否有紧急数据
+	  tcp_check_urg(sk,th);//如果存在紧急数据会设置sk->urg_data=URG_NOTYET
+	if(sk->urg_data!=URG_NOTYET)  
+	  return 0;
+	ptr=sk->urg_seq - th->seq + th.doff*4;//  在tcp_check_urg中sk->urg_seq=prt+=th.seq获取数据包里的偏移量
+	if（ptr>=len）//出错，仔细想想？
+	   return ;
+	sk->urg_data=URG_VALID|*(ptr + (unsigned char*)th);//读取紧急数据并且设置标志
+    if(!sk->dead)
+       date_ready(sk，0);//通知进程	
+	return 0;   	  
+}
+
+
+accept传输层实现
+struct sock*tcp_accept(struct sock*sk,int flags)
+{
+    。。。首先判断是否是LISTEN套接字不是直接返回
+	sk->inuse=1;
+	while(skb=tcp_dequeue_established(sk)!=NULL)
+	{
+	    if(flags&O_NOBLOCK)//非阻塞没有established数据包睡眠
+		{
+		   release_sock(sk);
+		   sk->err=EAGAIN;
+		   return NULL;
+		}
+		release_sock(sk);
+		。。。可中断睡眠
+		sk->inuse=1;
+	}
+	newsk=skb->sk;//到这里说明是有established的数据包/在处理连接请求的时候货分配各新的newsk；
+	kfree_skb(skb,FREE_READ);
+	sk->ack_backlog--;//将监听套接字的未应答数据包个数减一
+	release_sock(sk);
+	return newsk;
+}
+
+
+connect tcp层实现
+int tcp_connect(struct sock*sk,struct sockaddr_in*usin,int addr_len)
+{
+   //检查sk->state是否是TCP_CLOSE不是直接返回return -EISCONN
+   //检查入口参数addr_len<8 return -EINVAL;
+   //检查是不是AF_INET不是直接返回return -EAFNOSUPPORT;
+   //检查地址广播地址或者是多播地址return -ENETUNREACH;
+   //初始化数据
+   sk->inuse=1;
+   sk->daddr=usin->sin_daddr.s_addr;
+   sk->write_seq=tcp_init_seq();
+   sk->window_seq=sk->write_seq;
+   sk->rcv_ack_seq=write_seq-1;
+   sk->err=0;
+   sk->dummy_th.dest=usin->sin_port;
+   release_sock(sk);
+   //分配skb，buff=sk->prot_wmalloc(...);
+   ...//初始化buff
+   tl->seq=ntohl(sk->write_seq++);
+   sk->sent_seq=sk->write_seq;
+   buff->h.seq=sk->write_seq;
+   tl->ack=0;
+   tl->window=2;
+   tl->res1=0;
+   tl->res2=0;
+   tl->rst=0;
+   tl->urg=0;
+   tl->psh=0;
+   tl->syn=1;
+   tl->urg_ptr=0;
+   tl->doff=6;
+   ...//更新mtu mss
+   tcp_set_state(sk,TCP_SYN_SENT)；
+   sk->rto=TCP_TIMEOUT_INIT;
+   init_timer(&sk->retransmit_timer);
+   sk->retransmit_timer.function=&retransmit_timer;
+   sk->retransmit_timer.data=(unsigned long )sk;
+   sk->retransmits=TCP_SYN_RETRIES;
+   sk->prot->queue_xmit(sk,dev,buff,0);//发送syn数据包
+   reset_xmit_timer(sk,TIMER_WRITE,sk->rto);
+   relsease_sock(sk);
+   return 0;
+}
+
+
+
+tcp数据包seq检查
+int tcp_sequence(struct sock*sk,struct tcphdr*short len,struct options*opt,unsigend long saddr,struct device*dev)
+{
+    next_seq=len- th->doff * 4;//数据包数据长度
+	if(th->fin)
+	   next_seq++;
+	if(netx_seq&&!sk->window)
+	   goto ignore_it;//是个零窗口有数据的探测包
+	
+	next_seq+=th->seq;//指向负载最后个字节序列号
+	if(!after(next_seq+1,sk->acked_seq))
+	    goto ignore_it；//是已经读取的数据包
+	if(!before(th->seq,sk->window_seq+1+sk->acked_seq))
+        goto ignore_it;//断裂数据包
+    return 1;
+ignore_it:
+    if(th->rst)
+       return 0; 
+    if(sk->state==TCP_SYN_SENT||sk->state==TCP_SYN_RECV)
+    {
+	   tcp_rst(...);
+	   return 1;
+	}	
+	tcp_send_ack(sk->sent_seq,sk->acked_seq,sk,th,saddr);//提示对端重传希望的数据包
+	return 0;
+}
+
+
+
+处理rst数据包
+int tcp_std_reset(struct sock*sk,struct sk_buff*skb)
+{
+    sk->zapped=1;//收到rst设置的标志
+	sk->err=ECONNREST;
+	if(sk->state==TCP_SYN_SENT)
+	   sk->err=ECONNREFUSED;//在建联初期收到则返回拒绝连接
+	if(sk->state==TCP_CLOSE_WAIT)//接受fin发送了ack后的状态
+	   sk->err=EPIPE;
+	if(sk->state!=TCP_TIME_WAIT)//2ms时间防止最后的ack未到达对端的状态
+    {
+	   tcp_set_state(sk,TCP_CLOSE);
+	   sk->shutdown=SHUTDOWN_MASK;
+	}	
+	if(!sk->dead)
+	   sk->state_change(sk);
+	kfree_skb(skb,FREE_READ);
+    release_sock(sk);
+    return 0;		
+}
+
+//probe探测包发送函数。收到远端0窗口数据包后发送探测包
+void  tcp_send_probe0(struct sock*sk)
+{
+   if(sk->zapped)//排除已经收到rst的sk
+      return ;
+   tcp_write_wakeup(sk);//发送个旧序列的ack
+   sk->backoff++;
+   sk->rto=...//更新rto
+   reset_xmit_timer(sk,TIME_PROBE0,SK->rto);
+   sk->retransmits++;//重传计数
+   sk->prot->retransmits++;      
+}
+
+
+
+tcp协议选项设置和获取处理函数
+int tcp_setsockopt(struct sock*sk,int level,int optname,char*optval,int optlen)
+{
+    .....
+
+}
+int tcp_setsockopt(struct sock*sk,int level,int optname,char*optval,int *optlen)
+{
+    .....
+
+}
+
+tcp总入口函数
+int tcp_rcv(struct sk_buff*skb,struct device*dev,struct options*opt,unsigned long daddr,unsigned short len,unsigned long saddr,int redo,struct inet_protocol *protocol)
+{
+    。。。
+   //入口参数检查
+    sk=get_sock(&tcp_prot,th->dest,saddr,th->source,daddr);//获取sock
+    if(sk!=NULL&&(sk->zapped||sk->state==TCP_CLOSE))//判断sk不是个已经停止的sk
+     sk=NULL;
+	if(!redo)//这是个新的数据包不是之前缓存的
+    {
+	    if(tcp_check(th,len,saddr,daddr))//检查tcp负载及手部校验和
+		{//校验和失败
+		   skb->sk=NULL;
+		   kfree_skb(skb,FREE_READ);
+		   return 0;
+		}
+		if(sk==NULL)
+		{//没查到sock或者查到的不可用
+		    tcp_reset(daddr,saddr,th,&tcp_prot,opt,dev,skb->ip_hdr->tos,255);//重置对端
+			skb->sk=NULL;
+			kfree_skb(skb,FREE_READ);
+			return 0;
+		}
+		//初始化skb数据
+		skb->len=len;
+		skb->acked=0;
+		skb->used=0;
+		skb->free=0;
+		skb->saddr=daddr;
+		skb->daddr=saddr;
+		if(sk->inuse)//sk在使用中
+		{
+		   skb_queue_tail(&sk->back_log,skb);//将数据包挂在back_log上返回
+		   return 0;
+		}
+		sk->inuse=1;			
+	}
+    else
+    {
+	    if(sk==NULL)//在缓存过程中被关闭
+		{
+		   //没查到sock或者查到的不可用
+		    tcp_reset(daddr,saddr,th,&tcp_prot,opt,dev,skb->ip_hdr->tos,255);//重置对端
+			skb->sk=NULL;
+			kfree_skb(skb,FREE_READ);
+			return 0;
+		}
+	}
+
+    。。。//对skb->prot、接收缓冲区sk->rmem_alloc+skb->mem_len>sk->recvbuf.kfree_skb return 0;	
+	
+	skb->sk=sk;
+	sk->rmem_alloc+=skb->mem_len;//更新已分配内存数
+	if(sk->state!=TCP_ESTABLISHED)
+	{
+	    if(sk->state==TCP_LISTEN)
+		{//处理listen的情况
+		  if(th->ack)//listen接收到ack出错
+		    tcp_reset(daddr,saddr,th,sk->prot,opt,dev,sk->ip_tos,sk->ip_ttl);
+		
+		  if(th->rst||!th->syn||th->ack||ip_check_addr(daddr)!=IS_MYADDR)
+		  {//对于侦听套接字只关心syn其他直接丢弃处理
+		    kfree_skb(skb,FREE_READ);
+		    release_sock(sk);
+		    return 0;
+		  }
+		  //这里肯定skb->syn设置了调用对应处理函数处理
+		  tcp_conn_request(sk,skb,daddr,saddr,opt,dev,tcp_init_seq);
+		  release_sock(sk);
+		  return 0;
+	    }end of listen
+		if(sk->state==TCP_SYN_RECV&&th->syn&&th->seq+1==sk->acked_seq)
+		{//收到对面重发syn数据包处理方式直接丢弃
+		  kfree_skb(skb,FREE_READ);
+		  release_sock(sk);
+		  return 0;   
+		}end of TCP_SYN_RECV
+		
+		if(sk->state==TCP_SYN_SENT)
+		{
+		   if(th->ack)
+		   {
+		      if(!tcp_ack(sk,th,saddr,len))
+			  {//有问题的ack丢弃返回
+			     tcp_reset(daddr,saddr,th,sk->prot,opt,dev,sk->ip_tos,sk->ip_ttl);
+				 kfree_skb(skb,FREE_READ);
+				 relsease_sock(sk);
+				 return 0;
+			  }//如果tcp_ack
+		  
+		      if(th->rst)
+		      {
+		        return tcp_std_reset(sk,skb);
+		      }
+		      if(!th->syn)//syn未被置位
+		      {
+		         kfree_skb(skb,FREE_READ);
+			     relsease_sock(sk);
+			     return 0; 
+		      }
+		      syn_ok=1;
+		      sk->acked_seq=th->seq+1;
+		      sk->fin_seq=th->seq;
+		      tcp_send_ack(sk->sent_seq,sk->acked_seq,sk,th,sk->daddr);//发送最后一次握手包
+		      tcp_set_state(sk,TCP_ESTABLISHED);//改变sk状态为established
+		      tcp_options(sk,th);//读取options
+		      sk->dummy_th.dest=th->source;
+		      sk->copied_seq=sk->acked_seq;
+		      if(!sk->dead)
+		      {
+		        sk->state_change(sk);
+			    sock_wake_aysnc(sk->socket,0);//通知上层
+		      }
+		      if(sk->max_window==0)
+		      {
+		        sk->max_window=32;
+			    sk->mss=min(sk->max_window,sk->mtu);
+		      }
+		    }
+		    else//！th->ack
+		    {//th->ack没有设置
+		      if(th->syn&&!th->rst)
+              {
+			     if(sk->daddr=saddr,sk->daddr=daddr&&sk->dummy_th.source=th->source&&sk->dummy_th.dest==th->dest)
+				 {//四元组匹配判断这个数据包是不是自己发送的
+				 	return tcp_std_reset(sk,skb);					
+				 }
+				 //这一步表示同时打开
+				 tcp_set_state(sk,TCP_SYN_RECV);
+			  }
+              kfree_skb(skb,FREE_READ);
+              release_sock(sk);
+              return 0;			  
+			}
+			goto rfc_step6;
+		}enf of sk->state==TCP_SYN_SENT
+		
+		if( sk->state==TCP_TIME_WAIT&&tcp->syn&&sk->dad&&after(th->seq,sk->acked_seq)&&!th->rst)
+		{//time_wait 2ms时间防止最后的ack未到达对端的状态
+		  //处理重用地址的sk
+		  seq=sk->write_seq;//保存之前的write_seq;
+          sk->rmem_alloc-=skb->mem_len;
+          skb->sk=NULL;
+          sk->err=ECONNREST;
+          tcp_set_state(sk,TCP_CLOSE);
+          sk->shutdown=SHUTDOWN_MASK;
+          release_sock(sk);//释放sk	此函数会对TCP_CLOSE以及sk->dead的sk释放
+          sk=get_sock(&tcp_prot,th->dest,saddr,th->source,daddr);//返回的才是侦听套接字因为之前的按个旧的释放了		  
+		  if(sk&&sk->state==TCP_LISTEN)
+		  {
+		     sk->inuse=1;
+			 skb->sk=sk;
+			 sk->rmem_alloc+=skb->mem_len;
+			 tcp_conn_request(sk,skb,daddr,saddr,opt,dev,seq+12800);
+			 release_sock(sk);
+			 return 0;
+		  }
+		  kfree_skb（skb,FREE_READ）;
+		  return 0;
+		}end of sk->state==TCP_TIME_WAIT
+		
+	}end of sk->state!=TCP_ESTABLISHED	
+	if(!tcp_sequence(sk,th,len,opt,saddr,dev))
+	{//走到这里序列号有问题
+	   kfree_skb(skb,FREE_READ);
+	   release_sock(sk);
+	   return 0;
+	}
+	if(th->rst)
+	  tcp_std_reset(sk,skb);//设置了rst直接处理设置err状态
+    if(th->syn&&!syn_ok)//不在listen发送syn肯定不对重置
+    {
+	   tcp_reset(daddr,saddr,th,&tcp_prot,opt,dev,skb->ip_hdr->tos,255);
+	   return tcp_std_reset(sk,skb);
+	}   	
+	if(th->ack&&!tcp_ack(sk,th,saddr,len))//应答数据包但是应答数据包序列号不合法
+	{
+	   if(sk->state==TCP_SYN_RECV)
+	   {
+	     tcp_reset(daddr,saddr,th,&tcp_prot,opt,dev,sk->ip_tos,sk->ip_ttL);
+	   }
+	   kfree_skb(skb,FREE_READ);
+	   release_sock(sk);
+	   return 0;
+	}
+rfc_step6:
+    if(tcp_urg(sk,th,saddr,len))
+    {
+	   kfree_skb(skb,FREE_READ);
+	   release_sock(sk);
+	   return 0;
+	}	
+	if(tcp_data(skb,sk,saddr,len))
+	{
+	   kfree_skb(skb,FREE_READ);
+	   release_sock(sk);
+	   return 0;
+	}
+	relsease_sock(sk);
+	return 0;
+}
+
+
+		  

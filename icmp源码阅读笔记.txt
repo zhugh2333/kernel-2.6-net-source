@@ -1,0 +1,153 @@
+icmp数据包发送函数
+void icmp_send(struct sk_buff*skb_in,int type,int code,unsigned long info,struct device*dev)
+{
+    //获取收到的数据包的iph头
+	iph=(struct iphdr*)(skb_in->data+dev->hard_header_len);
+	//判断收到的数据包地址是否是本机
+	//PACKET_HOST 0
+    //PACKET_BROADREST 1
+    //PACKET_MULTICAST 2
+    //PACKET_OTHERHOST 3
+	if(skb_in->pkt_type!=PACKET_HOST)
+	   return ;//不是本机的数据包不管
+	atype=ip_chk_addr(iph->daddr);   
+	if(atype==IS_BROADCAT||IN_MULTICAST(iph->daddr))
+	   return ;//检查是否是个广播或者多播地址是则直接返回也不发送icmp
+	if(ntohs(iph->frag_off)&IP_OFFSET)
+       return ;//icmp只对第一个分片响应
+    if(type==ICMP_DEST_UNREACH||type==ICMP_REDIRECT||type==ICMP_SOURCE_QUENCH||type==ICMP_TIME_EXCEEDED)
+    {
+	   if(iph->protocol==IPPROTO_ICMP)//是icmp报文
+	   {
+	        icmph=(struct icmphdr*)((char*)iph+4*iph->ihl);//获取icmp数据包的icmp头
+		    if(icmph->type==ICMP_DEST_UNREACH||icmph->type==ICMP_SOURCE_QUENCH||icmph->type==ICMP_REDIRECT||icmph->type==ICMP_TIME_EXCEEDED
+		         ||icmph->type==ICMP_PARAMETERPROB)
+			{
+			    return ;//不对icmp数据包的这些类型进行响应
+			}  
+			
+	    }		
+	}
+    //计数
+    switch(type):
+    {
+	    根据type类型进行统计计数。
+	}  
+    len=dev->hard_header_len+sizeof(struct iphdr)+sizeof(struct icmphdr)
+	   +sizeof(struct iphdr)+32;//因为icmp负载是源数据包的iph头以及八字节的传输层头
+    skb=(struct sk_buff*)alloc_skb(len,GFP_ATOMIC);
+    if(skb==NULL)
+    {
+	    //分配失败 
+		//计数
+		return ;
+	}	
+	skb->free=1;//不需要重传
+	our_addr=dev->pa_addr;
+	if(iph->daddr!=our_addr&&ip_chk_addr(iph->daddr)==IS_MYADDR)
+	    our_addr=iph->daddr;//如果收到的数据包设备地址与数据包目的地址不是同一个但是数据包目的地址确实
+		                   //是本机的，则 使用数据包中的目的之作为源地址进行响应
+	//构建ip以及硬件头
+    offset=ip_build_header(skb,our_addr,....);
+    //更新skb->len
+    skb->len=offset+sizoef(struct iphdr)+sizeof(struct icmphdr)+8;//负载为ihpdr+8
+    //填充icmp
+    icmph=(struct icmphdr)(skb->data+offset);
+    icmph->type=type;
+    icmph->code=code;
+    icmph->checksum=0;
+    icmph->un.gateway=info;
+    memcpy(icmph+1;iph,sizeof(struct iphdr)+8);//拷贝源数据包的iph以及传输层8字节	
+	icmph->checksum=ip_compute_csum(...);//计算icmp效验和
+	ip_queue_xmit(NULL,ndev,skb,1);//进入网络层发送
+	
+}  
+
+
+static void icmp_unreach(struct icmphdr*icmph,struct sk_buff*skb)
+{
+    err=icmph->type<<8|icmph->code;//将type以及code赋值给err
+	iph=(struct icmphdr*)(icmph+1);//读取负载
+	switch(icmph->type&7)
+	{
+	    case    ICMP_NET_UNREACH:
+	                break;
+		case    ICMP_HOST_UNREACH:
+                    break;
+        case    ICMP_PROT_UNREACH:
+                	printk("icmp%s :%d protocol unreachable\n",in_ntoa(iph->daddr),ntohs(iph->protocol));	
+	                break;
+		case    ICMP_PORT_UNREACH:			
+		            break;
+		case    ICMP_FRAG_NEEDED:
+                    printk("icmp %s:fragmentation needed  and df set\n",in_ntoa(iph->daddr));
+					break;
+        case    ICMP_SR_FAILED:
+                printk("icmp %s  source route failed\n",in_ntoa(iph->daddr));
+                break;
+        default :
+                break;		
+	}
+	hash=iph->protocol&(MAX_INET_PROTOS-1);
+	ipprot=(struct inet_protocol*)inet_prot[hash];//查找本地对应的协议
+	while(ipprot!=NULL)
+	{
+        nextip=ipprot->next;
+        if(iph->protocl==ipprot->protocol&&ipprot->err_handler)
+            ipprot->err_handler(err,(struct icmphdr*)(icmph+1),iph->daddr,iphdr->saddr,ipprot);
+        ipprot=nextip;			
+	}//遍历对应的协议，调用对应的错误处理函数进行处理
+	kfree_skb(skb,FREE_READ);
+}
+
+处理重定向icmp报文
+void icmp_redirect(struct icmphdr*icmph,struct sk_buff*skb,struct device*dev,unsigned long source)
+{
+   iph=(struct iphdr*)(icmph+1);//icmph+1就是原先发送数据包的ip首部.负载为源ip+8字节
+   ip=iph->daddr;
+   //ICMP_REDIR_NET 0
+   //ICMP_REDIR_HOST 1
+   //ICMP_REDIR_NETTOS  2
+   //ICMP_REDIR_HOSTTOS 3
+   swicth(icmph->code&7)
+   {
+        case    ICMP_REDIR_NET :
+	                ip_rt_add((RTF_DYNAMIC|RTF_MODFIED|RTF_GATEWAY),ip,0,icmph->uh.gateway,dev,0,0);
+				    break;
+		case  	ICMP_REDIR_HOST:
+                    if((rt=ip_rt_route(ip,NULL,NULL))==NULL) 		
+				       break;//找不到路由则跳出不做操作
+				    if(rt->rt_gateway!=source||ip_chk_addr(icmph->un.gateway))
+				       break;//如果路由源地址不是发icmp重定向报文地址以及重定向地址不是广播以及多播地址等
+				    ip_rt_add((RTF_DYNAMIC|RTF_MODFIED|RTF_HOST|RTF_GATEWAY),ip,0,icmph->un.gateway,dev,0,0);
+                    break;
+        case    ICMP_REDIR_HOSTTOS:				
+	    case    ICMP_REDIR_NETTOS:
+		        break;//不支持
+		default :break;		
+   }
+   kfree_skb(skb,FREE_READ);
+   
+}
+
+echo 类型icmp处理函数//saddr 是远端地址，daddr是本地地址
+void  icmp_echo(struct icmphdr*icmph,struct sk_buff*skb,struct device*dev,
+                unsigned long saddr,unsigned long daddr,int len,struct options*opt)
+{
+    size=dev->hard_header_len+64+len;
+    skb2=alloc_skb(size,GFP_ATOMIC);
+    skb2->free=1;
+    offset=ip_build_header(...);
+    skb2->len=offset+len;
+    icmphr=(struct icmphdr*)(skb2->data+offset);
+    memcpy((char*)icmphr,(char*)icmph,len);//reply数据包就是原数据包只是改变了type
+    icmphr->type=ICMP_ECHOREPLAY;//设置reply类型
+    icmphr->code=0;
+    icmphr->checksum=0;
+    icmphr->checksum=ip_compute_csum((unsigned char*)icmphr,len);//计算icmp效验和
+    ip_queue_xmit((struct sock*)NULL,ndev,skb2,1);//发送
+    kfree_skb(skb,FREE_READ);	
+}
+
+
+
