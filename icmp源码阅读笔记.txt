@@ -149,5 +149,152 @@ void  icmp_echo(struct icmphdr*icmph,struct sk_buff*skb,struct device*dev,
     kfree_skb(skb,FREE_READ);	
 }
 
+时间戳报文处理
+//icmph时间戳请求报文的icmp首部，saddr发送请求数据包里的源地址
+//len是ip负载长度包括icmp以及icmp负载
+void   icmp_timestamp(struct icmphdr*icmph,struct sk_buff*skb,struct device*dev,
+                    unsigned long saddr,unsigned long daddr,int len,struct options*opt)
+{
+    if(len<20)
+    {
+	    //计数
+		if(len<12)//小于12字节表示没有发送端时间戳无法继续处理
+		  return;
+	}    
+	size=dev->hard_header_len+84;//84是60字节ip首部+icmp20字节首部+4字节帧效验字段
+    skb2=alloc_skb(size,GFP_ATOMIC);
+	skb2->free=1;
+	offset=ip_build_header(...);
+	skb2->len=offset+20;//预留20字节时间戳12字节时间戳+8字节icmp头
+	icmphr=(struct icmphdr*)((char*)(skb2->data+offset));
+	memcpy((cahr*)icmphr,(char*)icmph,12);
+	icmphr->type=ICMP_TIMESTAMPREPLY;
+	icmphr->code=icmphr->checksum=0;
+	midtime=(xtime.tv_sec%86400)*1000+xtime.tv_usec*1000;//取余86400表示当天零时起秒数*1000转换成毫秒
+	timeptr=(unsigned long*)(icmphr+1);//跳过icmp头,8字节icmp头
+	/*  struct icmphdr{
+	        unsigned char type;
+	        unsigned char code;
+	        unsigned short checksum;
+	        union{
+	           struct   {unsigned short id;
+			             unsigned short sequence;
+						}echo;
+				unsigned long gateway;
+            }un;
+        };		
+	*/
+	timeptr[1]=timeptr[2]=htonl(midtime);//第一个不用动值 操作第二个第三个
+	icmphr->check_sum=ip_compute_csum(...);//计算icmp效验和
+	ip_queue_xmit((struct sock*)NULL,ndev,skb2,1);
+	kfree_skb(skb2,FREE_READ);	
+}
+信息请求icmp处理报文
+void icmp_info(struct icmphdr*icmph,struct sk_buff*skb,struct device*dev, 
+               unsigned long saddr,unsigned long daddr,int len,struct options*opt)
+{
+    kfree_skb(skb,FREE_READ);
+}			   
+
+
+地址掩码icmp查询请求报文//返回本地地址对应的ip地址掩码
+void icmp_address(struct icmphdr*icmph,struct sk_buff*skb,struct device*dev,
+                  unsigned long saddr,unsigned long daddr,int len,struct options*opt)
+{
+    size=dev->hard_header_len+64+len;//mac首部+64（60字节ip首部+4字节帧效验长度）+len负载长度
+	skb2=alloc_skb(size,GFP_ATOMIC);
+	skb2->free=1;
+	offset=ip_build_header(skb2,daddr,saddr,&ndev,..)
+	skb2->len=offset+len;
+	icmphr=(struct icmphdr*)(skb2->data+offset);
+	icmphr->type=ICMP_ADDRESSREPLY;
+	icmphr->code=0;
+	icmphr->checksum=0;
+	icmphr->un.echo.id=icmph->echo.un.id;//原id
+	icmphr->un.echo.sequence=icmph->echo.un.sequence;//原序列号
+	memcpy((cahr*)(icmphr+1),(char*)&dev->pa_mask,sizeof(dev->pa_mask));//拷贝掩码到icmp头之后的数据区
+	icmphr->checksump=ip_compute_csum(...);
+	ip_queue_xmit((strucy sock*)NULL,ndev,skb2,1);
+	skb2->sk=NULL;
+	kfree_skb(skb2,FREE_READ);
+}
+
+//总入口函数，skb1是接受的icmp报文，redo=0表示是个新接收的报文，daddr表示这个报文的目的地址
+int icmp_rcv(struct sk_buff*skb1,struct device*dev,struct options*opt,unsigned long daddr,
+             unsigned short len,unsigned long saddr,int redo,struct inet_protocol*protocol)
+{
+    buff=skb1->h.raw;
+	icmph=(struct icmphdr*)buff;
+	if(ip_compute_csum(...))
+	{
+	   //效验失败
+	   kfree_skb(skb1,FREE_READ);
+	   return 0;
+	}
+	if(ip_chk_addr(daddr)!=IS_MYADDR)
+	{
+	   if(icmph->type!=ICMP_ECHO)//只对地址不是本机的icmp报文应答，因为mac能收但是地址不是本机就是可能本机是网关或者路由
+	   {
+	      kfree_skb(skb1,FREE_READ);
+		  return 0;
+	   }
+	    daddr=dev->pa_addr;
+	}
+	switch (icmph->type)
+	{
+	    case ICMP_TIME_EXCEEDED:
+		    icmp_unreach(icmph,skb1);
+            return 0;
+        case ICMP_DEST_UNREACH :
+            icmp_unreach(icmph,skb1);
+            return 0;
+        case ICMP_SOURCE_QUENCH :
+            icmp_unreach(icmph,skb1);
+            return 0;
+        case ICMP_REDIRECT  :
+            icmp_redirect(icmph,skb1,dev,saddr);
+            return 0;
+        case ICMP_ECHO:
+            icmp_echo(cimph,skb1,dev,saddr,daddr,len,dev);
+         	return 0;
+        case ICMP_ECHOREPLY:
+            kfree_skb(skb1,FREE_READ);
+            return 0;
+        case ICMP_TIMESTAMP:
+            icmp_timestamp(icmph,skb1,dev,saddr,daddr,len,opt);
+            return 0;
+        case ICMP_TIMESTAMPREPLY:
+            skb1->sk=NULL;
+           	kfree_skb(skb1,FREE_READ);
+            return 0;
+        case ICMP_INFO_REQUEST:
+            icmp_info(icmph,skb1,dev,saddr,daddr,len,opt);
+            return 0;
+        case ICMP_INFO_REPLY:
+            skb1->sk=NULL;		
+	        kfree_skb(skb1,FREE_READ);
+            return 0;
+		case ICMP_ADDRESS:
+            icmp_address(icmph,skb1,dev,saddr,daddr,len,opt);
+            return 0;
+        case ICMP_ADDRESSREPLY :
+            kfree_skb(skb1,FREE_READ);
+            return 0; 
+        default :			
+	        kfree_skb(skb1,FREE_READ);
+            return 0;
+	}
+	kfree_skb(skb1,FREE_READ);
+    return -1;
+
+}	
+
+int icmp_ioctl(struct sock*sk,int cmd,unsigned long arg)
+{
+ .....
+
+}		 
+
+
 
 
