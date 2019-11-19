@@ -1,0 +1,736 @@
+struct  datalink_proto{
+    unsigned short type_len;
+	unsigend cahr type[8];
+	cahr* string_name;
+	unsigned short header_length;
+	int (*rcvfun)(struct sk_buff*,struct device*,struct packet_type*);
+	void(*datalink_header)(struct datalink_proto*,struct sk_buff*,unsigend char*);
+	struct datalink_proto*next;
+	}
+	
+	
+struct datalink_proto*p8022_list=NULL;//维护上层协议队列
+
+
+
+struct  datalink_proto* find_8022_client(unsigned char type)
+{
+    for(proto=p8022_list;(proto!=NULL)&&(proto->type!=type);proto=proto->next)
+	{
+	    ;
+	}
+	return proto;
+}
+
+int p8022_rcv(struct sk_buff*skb,struct device*dev,struct paket_type*pt)
+{
+    proto=find_8022_client(*(skb->h.raw));
+	if(proto!=NULL)
+	{
+	    skb->h.raw+=3;
+		skb->len-=3;//去除LLC层头部
+		return proto->rcvfun(skb,dev,pt);
+	}
+	skb->sk=NULL;
+	kfree_skb(skb,FREE_READ);
+	return 0;
+}
+
+LLC层首部创建
+void p8022_datalink_header(struct datalink_proto*dl,struct sk_buff*skb,unsigned char*dest_node)
+{
+    len=skb->len;
+    hard_len=dev->hard_header_len;
+    dev->hard_header(skb->data,dev,len-hard_len,dest_node,NULL,len-hard_len,skb);
+	rawp=skb->data+hard_len;
+	*rawp=dl->type[0];//0xAA
+	rawp++;
+	*rawp=dl->type[0];
+	rawp++;
+	*rawp=0x03;
+	rawp++;
+	skb->h.raw=rawp;//指向链路层头
+	
+}
+802.2协议注册
+struct packet_type p8022_packet_type={
+    0,
+	NULL,
+	p8022_rcv,
+	NULL,
+	NULL,
+};
+void p8022_proto_init(struct net_proto*pro)
+{
+    p8022_packet_type.type=htons(ETH_P_802_2);
+	dev_add_pack(&p8022_packet_type);
+}
+
+8022.2提供给上层注册协议函数
+struct datalink_proto*register_8022_client(unsigned char type,int (*rcvfun)(....))
+{
+    proto=(struct datalink_proto*)kmalloc(...);
+	if(proto!=NULL)
+	{
+	    proto->type[0]=type;
+		proto->type_len=1;
+        proto->rcvfun=rcvfun;
+        proto->header_length=3;
+        proto->datalink_header=p8022_datalink_header;//创建链路层头部函数被snap函数调用		
+		proto->string_name="802.2";
+		proto->next=p8022_list;
+		p8022_list=proto;
+	}
+}
+
+eth
+void eth_setup(char*str,int *ints)
+{
+    d=dev_base;
+	if(!str||!*str)
+	{
+	    return ;//参数检查
+	}
+	while(d)
+	{
+	    if(!strcmp(d->name,str))
+	    {
+			if(ints[0]>0)
+		        d->irq=ints[1];
+	     	if(inst[0]>1)
+		        d->base_addr=inst[2];
+		    if(ints[0]>2)
+                d->mem_start=ints[3];
+			if(ints[0]>3)
+				d->mem_end=ints[4];
+			break;
+        }
+        d=d->next;		
+	}
+}
+struct ethhdr
+{
+    unsigned char h_dest[ETH_ALEN]; //目的MAC地址
+     
+    unsigned char h_source[ETH_ALEN]; //源MAC地址
+     
+    __u16 h_proto ; //网络层所使用的协议类型
+}；
+
+int eth_header(unsigned char*buff,struct device*dev,unsigned short type,void*addr,void*saddr,
+                unsigned len,struct sk_buff*skb)
+{
+	struct ethhdr*eth=(struct ethhdr*)buff;
+	if(type!=ETH_P_802_3)
+		eth->h_proto=htons(type);
+    else
+        eth->h_proto=htons(len);
+    if(saddr)
+		memcpy(eth->h_source,saddr,dev->addr_len);
+    else 
+		memcpy(eth->h_source,dev->dev_addr,dev->addr_len);//指定了源地址则设置源地址否则取设备地址
+	if(dev->flags&IFF_LOOPBACK)//环回设备直接设置dest为0
+	{
+		memset(eth->h_dest,0,dev->addr_len);
+		return dev->hard_header_len;
+	}	
+	if(daddr)
+	{	
+		memcpy(eth->h_dest,daddr,dev->addr_len);//指定了目的地址直接拷贝否则返回失败
+		return dev->hard_header_len;
+	}
+    return -dev->hard_header_len;	
+}				
+//重建mac报文头
+int eth_rebuild_header(void*buff,struct device*dev,unsigned long dst,struct sk_buff*skb)
+{
+    eth=(struct ethhdr*)buff;
+	if(eth->h_proto!=htons(ETH_P_IP))
+	{
+		memcpy(eth->h_source,dev->dev_addr,dev->addr_len);
+		return 0;//是否使用ip协议使用才进行下下面工作否则直接返回
+	}
+	return arp_find(eth->h_dest,dst,dev,dev->pa_addr,skb)? 1:0;
+}
+
+获取链路层首部上层协议字段值
+unsigned short eth_type_trans(struct sk_buff*skb,struct device*dev)
+{
+	eth=(struct ethhdr*)skb->data;
+	if(*eth->h_dest&1)//最高字节最低位是否为1，如果是1则表示是多播或者广播
+	{
+		if(memcmp(eth->h_dest,dev->broadcast,ETH_ALEN)==0)
+		{
+		    skb->pkt_type=PACKET_BROADCAST;//广播
+		}
+		else
+			skb->pkt_type=PACKET_MULTICAST;	//多播
+	}
+    if(dev->flags&IFF_PROMISC)//混杂模式
+	{
+	    if(memcmp(eth->h_dest,dev->dev_addr,ETH_ALEN))//相等返回0否则非0进入表示不是本机地址
+			skb->pkt_type=PACKET_OTHERHOST;
+	}	
+	if(ntohs(eth->h_proto)>=1536)//802.3首部封装最后两个字节 表示长度，如果大于1536表示是类型值
+		return eth->h_proto;
+	if(*((unsgned char*)eth+1)==0xffff)
+		return htons(ETH_P_802_3);
+	return ETH_P_802_2;	//通常的802.2封装
+}
+
+arp.c
+struct  arp_table{
+		struct arp_table*	next;
+		unsigned long 		last_used;//最后一次使用时间
+		unsigned int 		flags;
+		unsigned long 		ip;//arp对应的IP地址
+		unsigned long   	mask；//ip地址对应的网络掩码
+		unsigned char		ha[MAX_ADDR_LEN];//硬件地址
+		unisigned char 		hlen;//硬件地址长度
+		unisigned char		htype;//硬件地址类型
+		struct  device		*dev;//此arp表绑定的设备
+		struct  timer_list	timer;//超时时间
+		int 				retries;//重试次数
+		struct  sk_buff_head	skb;//用于未解析的skb队列
+}
+enmu{
+	PROXY_EXACT=0,
+	PROXY_ANY,
+	PROXY_NONE,
+}		
+
+struct timer_list arp_timer{NULL,NULL,ARP_CHECK_INTERVAL,0L,&arp_check_expire};
+void arp_check_expire(unsigned long dummy)
+{
+		for(i=0;i<FULL_ARP_TABLE_SIZE;i++)//遍历每个arp表
+		{
+			pentry=&arp_table[i];//arp_table是总表地址,数组每个元素是链表
+			while((entry=*pentry)!=NULL)
+			{
+				if(now-entry->last_used>ARP_TIMEOUT&&!(entry->flags&ATF_PERM))
+				{
+					*pentry=entry->next;
+					del_timer(&entry->timer);
+					kfree_s(entry,sizeof(struct arp_table));
+				}
+				else
+					pentry=&entry->next;
+			}
+		}
+		del_timer(&arp_timer);
+		arp_timer.expires=ARP_CHECK_INTERVAL;//更新定时器
+		add_timer(&arp_timer);
+}
+
+void arp_release_entry(struct arp_table*entry)//释放arp一个表项并释放挂在其上的数据包
+{
+	while(skb=skb_dequeue(&entry->skb)!=NULL)
+	{
+		skb_device_lcok(skb);
+		dev_kfree_skb(skb,FREE_WRITE);
+	}
+	del_timer(&entry->timer);
+	kfree_s(entry,sizeof(struct arp_table));
+}
+
+
+int arp_device_event(unsigned long event,void*ptr)
+{
+    dev=ptr;
+    if(event!=NETDEV_DOWN)
+	    return NOTIFY_DONE;
+    for(i=0;i<FULL_ARP_TABLE_SIZE;i++)
+    {
+	    pentry=&arp_tables[i];
+		while((entry=*pentry)!=NULL)
+		{
+		    if(entry->dev==dev)
+			{
+			    *pentry=entry->next;
+				del_timer(&entry->timer);//删除定时器
+				kfree_s(entry,sizeof(struct arp_table));//释放arp表	
+			}
+			else
+			    pentry=&entry->next;//非指定设备dev的arp表项进行下一个查找
+			   
+		}
+	}	
+	return NOTIFY_DONE;
+}
+
+
+//
+typedef struct arphdr
+{
+//arp首部
+unsigned short arp_hrd;    /* format of hardware address */
+unsigned short arp_pro;    /* format of protocol address */
+unsigned char arp_hln;    /* length of hardware address */
+unsigned char arp_pln;    /* length of protocol address */
+unsigned short arp_op;     /* ARP/RARP operation */
+
+unsigned char arp_sha[6];    /* sender hardware address */
+unsigned long arp_spa;    /* sender protocol address */
+unsigned char arp_tha[6];    /* target hardware address */
+unsigned long arp_tpa;    /* target protocol address */
+};
+
+
+void arp_send(int type,int ptype,unsigned long dest_ip,struct device*dev,unsigned long src_ip,
+              unsigned char*dest_hw,unsigned char src_hw)
+{
+    if(dev->flags&IFF_NOARP)
+	    return ;
+	skb=alloc_skb(sizeof(struct arphdr)+2*(dev->addr_len+4)+dev->hard_len);//分配一个arm+两个ip地址+一个硬件地址	
+	skb->len=sizeof(struct arphdr)+2*(dev->addr_len+4)+dev->hard_len;
+	skb->arp=1;
+	skb->dev=dev;
+	skb->free=1;//不缓存
+	dev->hard_header(skb->data,dev,ptype,dest_hw?dest_hw:dev->broadcast,src_hw?src_hw:NULL,skb->len,skb);
+	arp=(struct arphdr*)(dev->data+dev->hard_header_len);
+	arp->ar_hrd=htons(dev->type);//硬件地址类型
+	arp->ar_pro=htons(ETH_P_IP);//协议地址
+	arp->ar_hln=dev->addr_len;//硬件地址长度
+    arp->ar_pln=4;//协议地址长度
+	arp->ar_op=htons(type);//操作码
+	arp_ptr=(unsigned char*)arp+1;
+	memcpy(arp_ptr,src_hw,dev->addr_len);//拷贝源地址
+	arp_ptr+=dev->addr_len;
+	memcpy(arp_ptr,&src_ip,4);//拷贝源协议地址
+	arp_ptr+=4;
+	memcpy(arp_ptr,dest_hw?dest_hw:0,dev->addr_len);//拷贝硬件目的地址
+	arp_ptr+=dev->addr_len;
+	memcpy(arp_ptr,dest_ip,4);
+	dev_queue_xmit(skb,dev,0);	
+}			  
+//处理arp超时报文重发
+void arp_expire_request(unsigend long arg)
+{
+    entry=(struct arp_table*)arg;
+	if(entry->flags&ATF_COM)
+	     return ;//ATF_COM表示此表项解析完成
+	if(--entry->retries>0)	 
+	{
+	     del_timer(&entry->timer);
+		 entry->timer.expires=ARP_RES_TIME;
+		 add_timer(&entry->timer);
+		 arp_send(ARPOP_REQUEST,ETH_P_ARP,ip,dev,dev->pa_addr,NULL,dev->dev_addr);
+		 return ;	 
+	}
+	hash=HASH(entry->ip);//这里表示解析失败释放创建的表项
+	if(entry->flags&ATF_PUBL)
+	     pentry=&arp_table[PROXY_HASH];
+    else  
+         pentry=&arp_table[hash];
+    while(pentry!=NULL)
+    {
+	     if(*pentry==entry)
+		 {
+		    *pentry=entry->next;
+			del_timer(entry->timer);
+			arp_release_entry(entry);
+			return ;
+		 }
+		 pentry=&(*pentry)->next;
+	}	
+}
+
+发送所有缓存的数据包
+void arp_send_q(struct arp_table*entry,unsigned char*src_hw)
+{
+	if(!(entry->flags*ATF_COM))
+		return;//未解析完成
+	while(skb=skb_dequeue(&entry->skb)!=NULL)
+	{
+	    if(!skb->dev->rebuild_header(skb->data,skb->dev,skb->raddr,skb))//完成数据包首部创建
+		{
+		    skb->arp=1;
+			if(dev->sk==NULL)
+			   dev_queue_xmit(skb,skb->dev,0);
+			else
+               dev_queue_xmit(skb,skb->dev,skb->sk->priority);			
+		}
+	}
+}
+
+删除一个arp表项
+void arp_destroy(unsigned long  ip_addr,int force)
+{
+    hash=HASH(ip_addr);
+ugly:	
+	pentry=&arp_table[hash];
+	if(!*pentry)
+	   pentry=&arp_table[PROXY_HASH];
+	while((entry=*pentry)!=NULL)
+    {   if(entry->ip==ip_addr)
+	    {
+	        if(entry->flags&ATF_PERM&&!force)
+		       return;
+			*pentry=entry->next;
+			del_timer(entry->timer);
+            arp_release_entry(entry);//删除表项
+            goto ugly;			
+		}
+        pentry=&entry->next;
+        if(!checked_proxyies&&!*pentry)
+		    checked_proxyies=1;
+		pentry=&arp_tables[PROXY_HASH];		
+	}	
+}
+
+int arp_rcv(struct sk_buff*skb,struct device*dev,struct packet_type*pt)
+{
+    arp=skb->h.raw;
+	arp_ptr=(unsigned  char*)arp+1;
+	if(arp->ar_hln!=dev->addr_len||dev->type!=ntohs(arp->ar_hdr)
+	 ||dev->flags&IF_NOARP||arp->ar_pln!=4)//参数检查
+	{
+	    kfree_skb(skb,FREE_READ);
+		return ;
+	}
+	switch(dev->type)
+	{
+	    case ARPHRD_AX25:
+		    if(arp->ar_pro!=htons(AX25_P_IP))
+			{
+			   kfree_skb(skb,FREE_READ);
+			   return 0;
+			}
+			break;
+		case ARPHDR_ETHER:
+        case ARPHDR_ARCNET:
+            if(arp->ar_pro!=htons(ETH_P_IP))
+			{
+			   kfree_skb(skb,FREE_READ);
+			   return 0;
+			}
+			break;
+        default:
+		    kfree_skb(skb,FREE_READ);
+			return 0;
+            		
+	}
+	hlen=dev->addr_len;//硬件地址长度
+	htype=dev->type;
+	sha=arp_ptr;
+	arp_ptr+=hlen;
+	memcpy(&sip,arp_ptr,4);//读取源地址
+	arp_ptr+=4;
+	tha=arp_ptr;
+	arp_ptr+=hlen;
+	memcpy(&tip,arp_ptr,4);//读取目的地址
+	if(tip==INADDR_LOOPBACK)//若目的地址是环回地址直接丢弃
+	{
+	   kfree_skb(skb,FREE_READ);
+	   return 0;
+	}
+	addr_hint=ip_chk_addr(tip);
+	if(arp->ar_op==htons(ARPOP_REPLY))
+	{
+	    if(addr_hint!=IS_MYADDR)//非本机
+		{
+		   kfree_skb(skb,FREE_READ);
+		   return 0;
+		}
+	}
+	else
+	{
+	    if(tip!=dev->pa_addr)
+		{
+		   for(proxy_entry=arp_table[PROXY_HASH];proxy_hash,proxy_entry=proxy_entry->next)
+		   {
+		      if(proxy_entry->dev!=dev&&proxy_entry->htype!=htype&&!((proxy_entry->ip^tip)&proxy_entry->mnask))
+			     break;
+		   }
+		   if(proxy_entry)
+		   {
+		      memcpy(ha,proxy_entry->ha,hlen);
+			  arp_send(ARPOP_REPLY,ETH_P_IP,sip,dev,tip,sha,ha);
+			  kfree_skb(skb,FREE_READ);
+			  return 0;
+		   }
+		   else
+		   {
+		      kfree_skb(skb,FREE_READ);
+			  return 0;
+		   }
+		}
+		else
+		   arp_send(ARPOP_REPLY,ETH_P_IP,sip,dev,tip,sha,ha);//此处else是tip==dev->pa_addr
+	}
+	hash=HASH(sip);
+	for(entry=arp_tables[hash];entry;entry=entry->next)
+	{
+	    if(entry->ip==sip&&entry->htype==htype)//查找存在的表项
+		{
+		   break;
+		}
+	}
+	if(entry)
+	{
+	  //找到
+	  memcpy(entry->ha,sha,hlen);
+	  entry->hlen=hlen;
+	  entry->last_used=jiffies;
+	  if(!(entry->flags&ATF_COM))
+	  {
+	      del_timer(&entry->timer);
+		  entry->flags|=ATF_COM;
+		  arp_send_q(entry,sha);
+		  
+	  }
+	  
+	}
+	else
+	{
+	   entry=lmalloc(...);
+	   entry->mask=DEF_ARP_NETMASK;
+	   entry->ip=sip;
+	   entry->hlen=hlen;
+	   entry->htype=htype;
+	   entry->flags=ATF_COM;
+	   init_timer(&entry->timer);
+       memcpy(entry->ha,sha,hlen);
+	   entry->last_used=jiffies;
+	   entry->dev=skb->dev;
+	   skb_queue_head_init(&entry->skb);
+	   entry->next=arp_tables[hash];
+	   arp_tables[hash]=entry;//插入新表项
+	   
+	}
+	kfree_skb(skb,FREE_READ);
+	return 0;	     
+}
+
+
+arp表查询函数
+enum proxy
+{
+    PROXY_EXACT=0,
+	PROXY_ANY,
+	PROXY_NONE,
+}
+
+struct arp_table *arp_lookup(unsigned long paddr,enum proxy proxy)
+{
+    hash=HASH(paddr);
+    for(entry=arp_table[hash];entry!=NULL;entry=entry->next)
+    {
+	    if(entry->ip==paddr) break;//找到了
+	}    
+	if(!entry&&proxy!=PROXY_NONE)//查找proxy代理表项
+	  for(entry=arp_tables[PROXY_HASH];entry!=NULL；entry=entry->next)
+	     if((proxy==PROXY_EXACT)? entry->ip=paddr:!((entry->ip^paddr)&entry->mask))
+		      break;
+	return entry;		  
+}
+
+
+int arp_find(unsigned char*haddr,unsigned long paddr,struct device*dev,unsigned long saddr,struct sk_buff*skb)
+{
+    switch(ip_check_addr(paddr))
+	{
+	    case IS_MYADDR://本机地址
+		    memcpy(haddr,dev->dev_addr,dev->addr_len);
+			skb->arp=1;
+            return 0;	
+        case  IS_MULTICAST:
+            if(dev->type==ARPHDR_ETHER||dev->type==ARPHDR_IEEE802)
+            {
+			    haddr[0]=0x01;
+				haddr[1]=0x00;
+				haddr[2]=0x5e;
+				taddr=ntohl(paddr);
+				haddr[5]=taddr&0xff;
+				taddr=taddr>>8;
+				haddr[4]=taddr&0xff;
+				taddr=taddr>>8;
+				haddr[3]=taddr&0x7f;
+				return 0;	//多播是01005e+低0+23位ip地址		
+			}			
+		case   IS_BROACAST:
+		    memcpy(haddr,dev->broadcast,dev->addr_len);
+			skb->arp=1;
+			return 0;	
+	}
+	hash=HASH(paddr);
+	entry=arp_lookup(paddr,PROXY_NONE);
+	if(entry)
+	{
+	    if(!entry->flags&ATF_COM)//表项解析没有完成
+		{
+		    if(skb!=NULL)
+			{
+			    skb_queue_tail(&entry->skb,skb);
+			}
+			return 1;
+		}//走到这里肯定是ATF_COM的表项
+		entry->last_used=jiffies;
+		memcpy(haddr,entry->ha,dev->addr_len);
+		if(skb)
+		    skb->arp=1;//解析完成
+		return 0;	
+	}
+	//没找到表项
+	entry=(struct arp_table*)kmalloc(...);
+	if(entry!=NULL)
+	{
+	    entry->mask=DEF_ARP_NETMASK;
+		entry->ip=paddr;
+		entry->hlen=dev->addr_len;
+		entry->htype=dev->type;
+		entry->flags=0;
+		memset(entry->ha,0,dev->addr_len);
+		entry->dev=dev;
+		entry->last_used=jiffies;
+		init_timer(&entry->timer);
+		entry->timer.function=arp_expire_request;//超时处理函数
+		entry->timer.data=entry;
+		entry->timer.expires=ARP_RES_TIME;
+		entry->next=arp_table[hash];
+		arp_tables[hash]=entry;
+		add_timer(&entry->timer);
+		entry->retries=ARP_MAX_TRIES;
+		skb_queue_head_init(&entry->skb);
+		if(skb!=NULL)
+		{
+		    skb_queue_tail(&entry->skb,skb);
+		}
+			
+	}
+	else
+	{
+	    if(skb!=NULL&&skb->free)
+		    kfree_skb(skb,FREE_WRITE);
+	}
+	arp_send(ARPOP_REQUEST,ETH_P_ARP,paddr,dev,saddr,NULL,dev->dev_daddr);
+	return 1;
+}
+
+
+int arp_get_info(char* buffer,char**start,off_t offset,int length)
+{
+    。。。从arp_tbales遍历
+}
+
+
+
+设置arp表项
+
+struct arpreq{
+    struct sockaddr arp_pa;//协议地址
+	struct sockaddr arp_ha;//硬件地址
+	int  arp_flags;
+	struct sockaddr arp_netmask;//掩码	
+}
+int arp_req_set(struct arpreq *req)
+{
+    memcpy_fromfs(&r,req,sizeof(r));
+    if(r.arp_pa.sa_family!=AF_INET)
+        return  -EPFNOSUPPORT;
+	switch(r.arp_ha.sa_family):
+    {
+	    case ARPHDR_ETHER:
+		    htype=ARPHDR_ETHER;
+			hlen=ETH_ALEN;
+			brek;
+		case  ARPHDR_ARCNET:
+            htype=ARPHDR_ARCNET;
+            hlen=1;
+			break;
+		case  ARPHDR_AX25;
+            htype=ARPHDR_AX25;
+            hlen=7;
+            break;
+        default:
+            return -EPNOSUPPORT;					
+	}	
+	si=(struct sockaddr_in*)&r.arp_pa;
+	ip=si->sin_addr.s_addr;
+	if(ip==0)
+	   return -EINVAL;
+	rt=ip_rt_route(ip,NULL,NULL);//完成目的地址的可直达检测
+    if(rt!=NULL)
+        return -ENETUNREACH;
+	entry=arp_lookup(ip,PROXY_EXACT);
+    if(entry&&(entry->flags&ATF_PUBL)!=(r.arp_flags&ATF_PUBL))
+    {//ATF_PUBL表示是代理arp，如果新加入的标志和原来的代理标志不同则删除
+	    arp_destroy(ip,1);
+		entry=NULL;
+	}	
+	if(entry==NULL)
+	{
+	    if(r.arp_flags&ATF_PUBL)
+		   hash=PROXY_HASH;
+		entry=(struct arp_tables*)kmalloc(...);
+	    entry->ip=ip;
+    	entry->hlen=hlen;
+		entry->htype=htype;
+		init_timer(&entry->timer);
+		entry->next=arp_tables[hash];
+		arp_tables[hash]=entry;
+		skb_queue_head_init(&entry->skb);
+	}
+	//存在原有的entry
+	memcpy(&entry->ha,&r.arp_ha.sa_data,hlen);
+	entry->last_used=jiffies;
+	entry->flags=r.arp_flags|ATF_COM;
+	if((entry->flags&ATF_PUBL)&&(entry->flags&ATF_NMETMASK))
+	{
+	    si=&r.arp_netmask;
+		entry->mask=si->sin_addr.s_addr;
+	}
+	else
+	{
+	     entry->mask=DEF_ARP_NETMASK;
+	}
+	entry->dev=rt->rt_dev;
+	return 0;	
+}
+
+int arp_req_get(struct arpreq *req)
+{
+    memcpy_fromfs(&r,req,sizeof(r));
+	if(r.arp_pa.sa_family!=AF_INET);
+	    return  -EPFNOSUPPORT;
+	si=&r.arp_pa;
+    entry=arp_lookup(si->sin_addr.s_addr,PROXY_ANY);
+    if(entry==NULL)
+         return -ENXIO;
+    memcpy(r.arp_ha.sa_data,&entry->ha,entry->hlen);
+    r.arp_ha.sa_family=entry->htype;
+    r.arp_flags=entry->flags;
+    memcpy_tofs(req,&r,sizoef(r));
+    return 0;	
+}
+	
+int arp_ioctl(unsigned int cmd,void*arg)
+{
+    switch(cmd):
+	{
+	    case SIOCDARP:
+		    if(!suser())
+			    return -EPERM;
+			memcpy_fromfs(&r,arg,sizeof(r));
+            if(r.arp_pa.sa_family!=AF_INET)
+                return -EPFNOSUPPORT;
+			si=&r.arp_pa;
+            arp_destroy(si->sin_addr.s_addr,1);
+            return 0;
+        case SIOCGARP:
+            return arp_req_get(arg);
+        case  SIOCSARP:
+             return arp_req_set(arg);
+        default:
+             return -EINVAL;
+			 
+	}
+}
+
+struct packet_type arp_packet_type{
+    NULL,
+	arp_rcv,
+	NULL,
+	NULL
+};	
+	

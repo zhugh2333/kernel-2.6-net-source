@@ -1,0 +1,361 @@
+route
+
+struct rtable
+{
+    struct rtable  *rt_next;//指向下一个表项
+	unsigned long rt_dst;//目的地址
+	unsigned long rt_mask;//子网掩码
+	unsigned long rt_gateway;//网关地址
+	unsigned char rt_flags;//标志位
+	unsigned char rt_metruc;//度量值
+    short         rt_refcnt;//使用计数
+    unsigned long rt_use;//被使用计数
+    unsigned short rt_mss;//MSS值
+    unsigned long rt_window;//窗口大小
+    struct  device* rt_dev;//与该路由项绑定的接口   	
+}
+
+struct rttable*rt_base=NULL;//指向路由表项构成的链表
+
+void  rt_del(unsigned long dst,char*devname)//删除路由表项
+{
+    rp=&rt_base;
+	while((r=*rp)!=NULL)
+	{
+	    if(r->rt_dst!=dst||devname!=NULL&&strcmp(r->rt_dev->rt_devname,devname)!=0)
+	    {
+	       rp=&r->rt_next;
+		   continue;
+	    }
+	    *rp=r->rt_next;//删除查找到的表项
+	    if(rt_lookback==r)
+	       rt_llokback=NULL;
+		kfree_s(r,sizeof(struct rtable));   	
+	}	
+}
+
+
+void ip_rt_flush(struct device*dev)
+{
+    rp=&rt_base;
+	while((r=*rp)!=NULL)
+	{
+	    if(r->rt_dev!=dev)
+		{
+		    rp=&r->rt_next;
+			continue;//这里 是不匹配设备的继续下一次查找
+		}
+		*rp=r->rt_next;//没有进入上面if语句说明匹配，删除表项
+		if(rt_lookback==r)//如果是环回地址删除
+		   rt_lookback=NULL;
+		kfree_s(r,sizeof(struct rtable));   
+	}
+}
+
+获取ip地址类型计算掩码
+unsigned long default_mask(unsigned long dst)
+{
+    dst=htonl(dst);
+	if(IN_CLASSA(dst))
+	   return htonl(IN_CLASSA_NET);
+	if(IN_CLASSB(dst))
+	   return htonl(IN_CLASSB_NET); 
+	   
+	return htonl(IN_CLASSC_NET);   	   
+}
+
+unisgned long guess_mask(unsigned long dst,struct device*dev)
+{
+    if(!dst)
+	    return 0;
+    mask=default_mask(dst);
+	if((dst^dev->pa_addr)&mask)
+	    return mask;//根据目的地址异或源地址算出来与mask不为0则是mask
+	
+	return dev->pa_mask;//没有相同位则是dev的mask	
+}
+
+获取到指定网关的接口
+struct device*get_gw_dev(unsigned long gw)
+{
+    for(rt=rt_base;;rt=rt->rt_next)
+	{
+	    if(!rt)
+		    return NULL;
+		if((gw^rt->rt_dst)&rt->rt_mask)
+            continue;//没找到
+        if(rt->rt_flags&RTF_GATEWAY)
+            return NULL;//找到的路由是带网关的则表示不能直达则忽略
+        return rt->rt_dev;			
+	}
+}
+
+
+添加一个路由表项
+flags:路由表项标志位
+dst:目的ip地址
+mask：子网掩码
+gw：到达目的主机的网关ip地址
+dev:发送到目的地址主机的接口
+mtu：发送到对应目的主机的最大报文长度
+window：窗口值
+void ip_rt_add(short flags,unsigned long dst,unsigned long mask,
+               unsigned long gw,struct device*dev,unsigned short mtu,unisgned long window)
+{
+    if(flags&RTF_HOST)
+	   mask=0xffffffff;//路由地址是主机则掩码是255.255.255.255
+	else if(!mask)
+    {//目的地址不是主机且未指定了mask
+	    if(!((dst^dev->pa_addr)&dev->pa_mask))//目的网络与本机是同一子网
+		{
+		    mask=dev->pa_mask;
+		    flags&=~RTF_GATEWAY;//清除网关标志
+		    if(flags&RTF_DYNAMIC)
+		       return ;
+		}
+		else
+		   mask=guess_mask(dst,dev);
+		dst&=mask;   
+	}
+    if(gw==dev->pa_addr)	
+	    flags&=~RTF_GATEWAY;//网关是本机地址则表示目的端是主机清除GATEWAY标志
+	if(flags&RTF_GATEWAY)
+	{
+	    if(dev!=get_gw_dev(gw))
+		   return ;//指定的设备不是到达路由网关的设备
+		flags|=RTF_GATEWAY;
+	}
+	else
+	{
+	    gw=0;
+	}
+	rt=kmalloc(...);
+	if(rt==NULL)
+	   return ;
+	memset(rt,0,sizeof(struct rtable));
+    rt->rt_flags=flags|RTF_UP;//设置启动标志
+    rt->rt_dst=dst;
+    rt->rt_dev=dev;	
+	rt->rt_gateway=gw;
+	rt->rt_mask=mask;
+	rt->rt_mss=dev->mtu-HEADER_SIZE;
+	rt->window=0;//默认为0
+	if(rt->rt_flags&RTF_MSS)
+	    rt->rt_mss=mtu;
+	if(rt->rt_flags&RTF_WINDOW)
+	    rt->rt_window=window;
+	//插入rt
+    rp=&rt_base;
+    while((r=*rp)!=NULL)
+    {
+	    if(r->rt_dst!=dst||r->rt_mask!=mask)
+		{
+		    rp=&r->rt_next;
+			continue;
+		}
+		*rp=r->rt_next;
+		if(rt_loopback==r)
+		    rt_loopback=NULL;
+		free_s(r,sizeof(struct rtable));	
+	}//删除dst以及mask都等的路由表项
+    rp=&rt_base;
+    while((r=&rp)!=NULL)
+    {
+	    if((r->rt_mask&mask)!=mask)
+		    break;
+		rp=&r->rt_next;	
+	}	
+	rt->rt_next=r;
+	*rp=rt;//插入表
+	if((rt->rt_dev->flags&IFF_LOOPBACK)&&!rt_loopback)
+	    rt_loopback=rt;//判断是个环回地址则更新环回路由接口
+	
+    return;			
+}			   
+
+
+
+检查子网有效性
+int  bad_mask(unisgned long mask,unsigned long addr);
+
+struct rtentry{
+       unsigned long rt_hash;//用于查找的hashkey
+	   struct sockaddr rt_dst;//目的地址
+	   struct sockaddr rt_gateway;//网关地址
+       struct sockaddr rt_genmask;//目标地址掩码
+	   short rt_flags;//标志位
+	   short rt_refcnt//使用计数
+	   unisgned long rt_use;//被使用计数
+	   struct ifnet  *rt_ifp;//??
+	   short  rt_metric;
+	   char *rt_dev;//添加路由指定的设备
+	   unsigned long rt_mss;//mtu
+	   unsigned long rt_window;//window值
+}
+
+处理用户手工指定的路由项命令
+int rt_new(struct rtentry*r)
+{
+    if((devname=r->rt_dev)!=NULL)
+	{
+	    err=getname(devname,&devname);
+	    if(err)
+	       return err;
+		dev=get_dev(devname);
+        putname(devname);
+        if(!dev)
+            return -EINVAL;		
+	}  
+	if(r->rt_dst.sa_family!=AF_INET)
+	    return -EAFNOSUPPORT;
+	flags=r->rt_flags;
+    daddr=((struct sockaddr_in*)&r->rt_dst)->sin_addr.s_addr;
+	gw=((struct sockaddr_in*)&r->rt_gateway)->sin_addr.s_addr;
+	mask=((struct sockaddr_in*)&r->rt_genmask)->sin_addr.s_addr;
+	if(!dev&&(flags&RTF_GATEWAY))
+	    {
+		    for(dev2=dev_base;dev2!=NULL;dev2=dev2->next)
+			{
+			    if((dev2->flags&IFF_UP)&&dev2->pa_addr==gw)
+				{
+				   flags&=~RTF_GATEWAY;//清除标志
+				   dev=dev2;
+				   break;
+				}
+			}
+		}
+		
+    if(bad_mask(mask,daddr))
+	    mask=0;
+	if(flags&RTF_GATEWAY)
+    {
+	    if(r->rt_gateway.sa_family!=AF_INET)
+		    return -EAFNOSUPPORT;
+		if(!dev)
+            dev=get_gw_dev(gw);		
+	}
+    else if(!dev)
+        dev=ip_dev_check(daddr);
+    if(dev==NULL)
+        return -ENETUNREACH;
+		
+    ip_rt_add(flags,daddr,mask,gw,dev,r->rt_mss,r->rt_window);
+    return 0;	
+}
+删除路由
+int rt_kill(struct rtentry*r)
+{
+    trg=(struct sockaddr_in*)&rt->rt_dst;
+	if((devname=rt->rt_dev)!=NULL)
+	{
+	    err=getname(devname,&devname);
+		if(err)
+		    return err;
+			
+	}
+	rt_del(trg->sin_addr.s_addr,devname);
+	if(devname!=NULL)
+	   putname(dvname);
+	   
+	return 0;   
+}
+
+获取路由缓存信息
+int rt_get_info(char*buffer,char**start,off_t offset,int length)
+{
+    len+=sprintf(buffer,"Iface\tDestination\tGateway\tFlags\tRefCnt\tMask\tMtu\tWindow\n");
+	pos=len;//记录描述符输出位置
+	for(rt=rt_base;r!=NULL;r=r->rt_next)
+	{
+	    size=sprintf(buffer+len,....);
+		len+=size;
+		pos+=size;
+		if(pos<offset)//覆盖offset之前读取的位置
+		{
+		   len=0;
+		   begin=pos;
+		}
+		if(pos>offset+length)
+		{
+		   break;
+		}
+		
+	}
+	*start=buffer+(offset-begin);
+	len-=(offset-begin);
+	if(len>length)
+	    len=length;
+    return len;		
+}
+
+ip模块调用查询路由
+src_addr是函数填入查询到的路由表项接口设备对应的IP地址
+define early_out ({goto no_route;1})
+struct rtable*ip_rt_route(unsigned long daddr,struct options*opt,unsigned long *src_addr)
+{
+   for(rt=rt_base;rt!=NULL||early_out;rt=rt->rt_next)//early_out是当rt==NULL才会跳转
+   {
+        if(!((rt->rt_dst^daddr)&rt->rt_mask))//找到同一个子网的路由
+	        break;//是则跳出循环
+		if(rt->rt_flags&RTF_GATEWAY)//非直达路由跳过继续下一个
+            continue;
+        if(rt->rt_dev->flags&IFF_BROADCAST)&&rt->rt_dev->pa_brdaddr==daddr)
+            break;//目的地址是广播地址且设备广播地址相同则此路由可以使用		
+			
+   }
+    if(src_addr!=NULL)
+        *src_addr=rt->rt_dev->pa_addr;//获取路由出口设备源地址
+	if(daddr==rt->rt_dev->pa_addr){//目的地址是本地址则需要查找环回路由
+	    if((rt->rt_loopback)==NULL)
+		    goto no_route;
+	}	
+	rt->rt_use++;
+	return rt;
+	no_route:
+	       return NULL;
+}
+
+
+struct rtable*ip_rt_local(unsigned long daddr,struct options*opt,unsigned long *src_addr)
+{
+    for(rt=rt_base;rt!=NULL||early_out;rt=rt->rt_next)
+	{
+	    if(rt->rt_flags&RTF_GATEWAY)//非直达路由跳过继续下一个
+            continue;//这样只会比较找到本地链路上的
+		if(!((rt->rt_dst^daddr)&rt->rt_mask))//找到路由？？没看懂
+	        break;//跳出循环
+		if(rt->rt_dev->flags&IFF_BROADCAST)&&rt->rt_dev->pa_brdaddr==daddr)
+            break;//目的地址是广播地址且设备广播地址相同则此路由可以使用	
+        			
+	}
+	if(src_addr!=NULL)
+        *src_addr=rt->rt_dev->pa_addr;//获取路由出口设备源地址
+	if(daddr==rt->rt_dev->pa_addr){//目的地址是本地址则需要查找环回路由
+	    if((rt->rt_loopback)==NULL)
+		    goto no_route;	
+	}	
+	rt->rt_use++;
+	return rt;
+	no_route:
+	       return NULL;
+
+}
+
+
+结构转换函数就是将old_rtentry--->>rtentry
+int ip_get_old_rtent(struct old_rtentry*src,struct rtentry*rt)
+{
+    .....
+}
+int ip_rt_ioctl(unsigned long cmd,void*arg)
+{
+    ....
+
+}
+
+
+
+
+
+
+

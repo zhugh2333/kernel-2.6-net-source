@@ -1,0 +1,401 @@
+多播地址
+D类地址专用于多播1110，低28位全用于多播组号
+多播mac地址构建是通过ip映射的多播mac前缀是01:00:5e，低24位最高位置0其余23位映射多播ip地址低23位
+网卡设备维护的多播mac地址
+struct  dev_mc_list
+{
+   struct dev_mc_list*next;
+   char   dmi_addr[MAX_ADDR_LEN];
+   unsigned short dmi_addrlen;
+   unsigned short short dmi_users;   
+}；
+struct ip_mc_socklist{
+   unsigned long multiaddr[IP_MAX_MEMBERSHIPS];
+   struct device *multidev[IP_MAX_MEMBERSHIPS];
+}
+strict ip_mc_list{
+   struct device*interface;
+   unsigned long multiaddr;
+   struct ip_mc_list *next;
+   struct timer_list timer;
+   int tm_running;
+   int users;
+}
+
+IGMP头部长度固定8字节
+IGMP使用规则
+【1】当第一个进程加入组的时候发送一个IGMP报告；如果有一个主机存在多个进程加入同一组也只发送一个igmp
+【2】当进程离开多播组不发送IGMP报文，
+【3】多播路由器定时发送IGMP查询报文任何主机还有存在任何多播组的进程
+【4】主机通过发送一个IGMP报告来响应IGMP查询
+多播路由器对每个接口维护一个表，表中记录的至少还包含一个主机进程的多播组
+struct device {
+    struct dev_mc_list *mc_list;
+	int mc_count;
+	struct ip_mc_list  *ip_mc_list;
+	....
+}
+struct sock{
+    int ip_mc_ttl;
+	int ip_mc_loop;
+	char ip_mc_name[MAX_ADDR_LEN];
+	struct ip_mc_socklist *ip_mc_list;
+	...
+}
+
+定时器管理函数
+void igmp_stop_timer(struct ip_mc_list*im)
+{
+    del_timer(&im->timer);
+	im->tm_running=0;
+}
+返回1-10s的随机时间
+int random(void)
+{...}
+
+void igmp_start_timer(struct ip_mc_list*im)
+{
+    int tv;
+	if(im->running)
+	  return;//定时器已经在运行
+	tv=random()%(10*HZ);
+    im->timer.expires=tv;
+    im->tm_running=1;
+    add_timer(&im->timer);//注册定时器	
+}
+
+
+定时器初始化函数
+void igmp_init_timer(struct ip_mc_list*im)
+{
+    im->tm_running=0;
+	init_timer(&im->timer);
+	im->timer.data=(unisgned long *)im;
+	im->timer.function=&igmp_timer_expire;
+   	
+}
+
+定时器函数
+void igmp_timer_expire(unisgned long data)
+{
+    struct ip_mc_list*im=(struct ip_mc_list*)data;
+	igmp_stop_timer(im);
+	igmp_send_report(im->interface,im->multiaddr,IGMP_HOST_MEMBERSHIPS_REPORT);//到期发送igmp报告
+}
+
+void igmp_send_report(struct device*dev,unsigned long addrss,int type)
+{
+    struct sk_buff*skb=alloc_skb(MAX_IGMP_SIZE,GFP_AUTOMIC);
+	tmp=ip_build_header(skb,INADDR_ANY,addrsss,&dev,IPPROTO_IGMP,NULL,skb->mem_len,0,1);//目的地址是多播地址
+	igh=(struct igmphdr*)(skb->data+tmp);
+	skb->len=tmp+sizeof(*igh);
+	igh->csum=0;
+	igh->unused0;
+	igh->type=type;
+	igh->group=addrss;//多播地址
+	igh->csum=ip_coplete_sum((void*)igh,sizeof(*igh));\
+	ip_queue_xmit(NULL,dev,skb,1);//发送	
+}
+
+
+igmp收到报告报文报文就停止发送报告报文
+void igmp_heard_report(struct device*dev,unsigned long address)
+{
+    for(im=dev->ip_mc_list;im!=NULL;im=im->next)
+    {
+	   if(im->multiaddr==address)
+	     igmp_stop_timer(im);//遍历多播地址列表找到对应的地址停止报告定时器
+	}	
+}
+收到查询报文开启报告定时器
+void  igmp_heard_report(struct device*dev)
+{
+    for(im=dev->ip_mc_list;im!=NULL;im=im->next)
+    {
+	   if(im->multiaddr==address)
+	     igmp_start_timer(im);//遍历多播地址列表找到对应的地址开启报告定时器
+	}	
+}
+
+多播mac地址到ip地址映射
+void ip_mc_map(unsigned long addr,char*buf)
+{
+    addr=nohl(addr);
+	buf[0]=0x01;
+	buf[1]=0x00;
+	buf[2]=0x5e;
+	buf[5]=addr&0xFF;
+	addr>>=8;
+	buff[4]=addr&oxFF;
+	addr>>=8;
+	buf[3]=addr&0x7F;
+}
+
+多播地址添加删除函数
+void  ip_mc_filter_add(struct device*dev,unsigned long addr)
+{
+    if(dev->type!=ARPHRD_ETHER)
+	   return;//仅仅用于以太网
+	ip_mc_map(addr,buf);
+    dev_mc_add(dev,buf,ETH_ALEN,0);	
+}
+
+ip_mc_filter_del(struct device*dev,unsigned long addr)
+{
+    if(dev->type!=ARPHRD_ETHER)
+	   return;//仅仅用于以太网
+	ip_mc_map(addr,buf);
+    dev_mc_delete(dev,buf,ETH_ALEN,0);
+}
+
+void igmp_group_dropped(struct ip_mc_list*im)
+{
+    del_timer(&im->timer);
+	igmp_send_report(im->interface,im->multiaddr,IGMP_HOST_LEAVE_MESSAGE);
+	ip_mc_filter_del(im->interface,im->multiaddr);
+}
+void igmp_group_added(struct ip_mc_list*im)
+{
+    del_timer(&im->timer);
+	igmp_send_report(im->interface,im->multiaddr,IGMP_HOST_LEAVE_MESSAGE);
+	ip_mc_filter_add(im->interface,im->multiaddr);
+}
+
+
+int igmp_rcv(struct sk_buff*skb,struct device*dev,struct options*opt,
+            unsigned long daddr,unsigned short len,unsigned long saddr,int redo,struct inet_protocol*protocol)
+	{
+	    if(skb->ip_hdr_ttl!=1||ip_complete_csum(...))
+        {//ttl不为1或者效验失败
+       		kfree_skb(skb,FREE_READ);
+		    return 0; 
+		}	
+		igh=(struct igmphdr*)skb->h.raw;
+		if(igh->type==IGMP_HOST_MEMBERSHIPS_QUERY&&daddr==IGMP_ALL_HOST)//查询报文
+		     igmp_heard_query(dev);
+		if(igh->type==IGMP_HOST_MEMBERSHIPS_REPORT&&daddr==igh->group)//报告报文
+		     igmp_heard_report(dev,igh->group);
+        kfree_skb(skb,FREE_READ);
+        return 0;		
+	}
+
+套接字加入多播组
+void ip_mc_inc_group(struct device*dev，unsigned long addr)
+{
+    for(i=dev->ip_mc_list;i!=NULL;i=i->next)
+	{
+	    if(i->multiaddr==addr)//如果找到对应的多播组
+		{
+		   i->user++;//增加多播使用者计数
+		   return ;
+		} 
+	}
+	i=(struct ip_mc_list*)kmalloc(sizeof(*i),GFP_KERNEL);//没找到分配个
+	i->users=1;
+	i->interface=dev; 
+	i->multiaddr=addr;
+	i->next=dev->ip_mc_list;
+	igmp_group_added(i);
+	dev->ip_mc_list=i;	
+}	
+
+
+void ip_mcv_dev_group(struct device*dev,unsigned long addr)
+{
+    for(i=&(dev->ip_mc_list);*i!=NULL;*i=*i->next)
+	{
+	    if(i->multiaddr==addr)
+		{
+		   if(i->user--);//计数减一不为0
+		   return ;
+		} 
+		else
+		{
+		   igmp_group_dropped(tmp);
+		   *i=*i->next;
+		   kfree_s(tmp,szieof(*tmp));
+		}
+	}
+}
+
+
+int ip_mc_join_group(struct sock*sk,struct device*dev,unsigned long addr)
+{
+    if(!MULTICAST(addr))
+	    return -EINVAL;
+	if(!(dev->flags&IFF_MULTICAST)
+        return -EADDRNOTAVAIL;
+    if(sk->ip_mc_list==NULL)
+        sk->ip_mc_list=(struct ip_mc_socklist*)kmalloc(...);
+    for(i=0;i<IP_MAX_MEMBERSHIPS;i++)
+    {
+	    if(sk->ip_mc_list->multicast[i]==addr&&sk->ip_mc_list->multicast[i]==dev)
+		    return -EADDRINUSE;
+		if(sk->ip_mc_list->multidev[i]==dev)
+            unused=1;		
+	}	
+	if(unused==-1)
+	    return -ENOBUFS;
+	sk->ip_mc_list->multiaddr[unused]=addr;	
+	sk->ip_mc_list->multidev[unused]=dev;
+	ip_mc_inc_group(addr,dev);
+	return 0;
+}
+
+
+int  ip_mc_level_group(struct sock*sk,struct device*dev,unsigned long addr)
+{
+    if(!MULTICAST(addr))
+	    return -EINVAL;
+	if(!(dev->flags&IFF_MULTICAST)
+        return -EADDRNOTAVAIL;
+	if(sk->ip_mc_list==NULL)
+	    return -EADDRNOTAVAIL;
+	for(i=0;i<IP_MAX_MEMBERSHIPS;i++)
+    {
+	    if(sk->ip_mc_list->multicast[i]==addr&&sk->ip_mc_list->multicast[i]==dev)
+		{
+		     sk->ip_mc_list->multidev[i]=NULL;
+			 ip_mc_dev_group(dev,addr);
+			 return 0;
+			 
+		}
+	}		
+	return  -EADDRNOTAVAIL;
+}
+
+
+处理网卡设备停止调用函数
+void  ip_mc_drop_device(struct device*dev)
+{
+    for(i=(dev->ip_mc_list);i!=NULL;i=i->next)
+	{
+	    j=i->next;
+		free_s(i,sizeof(*i));
+	}
+	dev->ip_mc_list=NULL;
+}
+
+网卡设备激活时调用
+void ip_mc_allhost(struct device*dev)
+{
+    for(i=dev->ip_mc_list;i!=NULL;i=i->next)
+	{
+	    if(i->multiaddr==IGMP_ALL_HOST)
+		   return ;
+	}
+	i=(struct ip_mc_list*)kmalloc(...);
+	i->users=1;
+	i->interface=dev;
+	i->multiaddr=IGMP_ALL_HOST;
+	i->next=dev->ip_mc_list;
+	dev->ip_mc_list=i;
+	ip_mc_filter_add(i->interface,i-><multiaddr);
+}
+
+
+处理套接字关闭的多播组处理
+void  ip_mc_drop_socket(struct sock*sk)
+{
+    for(i=0;i<IP_MAX_MEMBERSHIPS;i++)
+	{
+	    if(sk->ip_mc_list->multidev[i])
+		{
+		  ip_mc_dev_group(sk->ip_mc_list->multidev[i],sk->ip_mc_list->multiaddr[i]);
+		  sk->ip_mc_list->multidev[i]=NULL;
+		}
+	}
+	kfree_s(sk->ip_mc_list,sizeof(*sk->ip_mc_list));
+	sk->ip_mc_list==NULL;
+}
+
+struct dev_mc_list{
+    struct dev_mc_list*next;
+	char dmi_addr[MAX_ADDR_LEN];
+	unsigned short dmi_addrlen;
+	unsigned short dmi_users;
+}
+
+void dev_mc_add(struct device*dev,void*addr,int alen,int newonly)
+{
+    ...
+	for(dmi=dev->mc_list;dmi!=NULL;dmi=dmi->next)
+	{
+	    if(memcmp(dmi->dmi_addr,addr,dmi->addr_len)==0&&dmi->addr_len==alen)
+		{
+		    if(!newonly)//存在且未设置newonly进行使用计数增加否则直接返回
+		      dmi->dmi_users++;
+			return ;  
+		}
+	}
+	dmi=...kmalloc(...);
+	dmi->dmi_addrlen=alen;
+	dmi->next=dev->mc_list;
+	dmi->dmi_users=1;
+	dev->mc_list=dmi;
+	dev->mc_count++;
+	dev_mc_upload(dev);	
+}
+
+void dev_mc_upload(struct device*dev)
+{
+    if(!dev->flags&IFF_UP)
+	    return ;
+	if(dev->set_multicast_list==NULL)
+        return ;//驱动程序没有提供相应的多播地址设置函数
+	if(dev->flags&IFF_PROMISC)
+    {
+	    dev->set_multicast_list(dev,-1,NULL);
+		return ;//混杂模式不需要设置多播
+	} 
+    if(dev->mc_count==0)//为0 表示没有人使用
+    {
+	    dev->set_multicast_list(dev,0,NULL);//0表示第三个参数多播地址列表多播地址个数
+		return ;
+	} 
+    data=kamlloc(...)
+    for(tmp=data,dmi=dev->mc_list; dmi!=NULL;dmi=dmi->dmi_next)//将dev->mc_list指向的链重新加入
+    {
+	    memcpy(tmp,dmi->dmi_addr,dmi->dmi_addrlen);
+		tmp+=dev->addr_len;
+	} 
+    dev->set_multicast_list(dev,dev->mc_count,data);
+    kfree(data);	
+}
+
+void dev_mc_delete(struct device*dev,void*addr,int alen,int all)
+{
+    for(dmi=&dev->mc_list;dmi!=NULL;dmi=dmi->next)
+	{
+	    if(memcmp(dmi->dmi_addr,addr,dmi->addr_len)==0&&dmi->addr_len==alen)
+		{
+		    tmp=dmi;
+		    if(--(*dmi)->dmi_users&!all)
+			{
+			   return ;//不是删除全部仅仅是减少计数
+			}
+			//下面说明dmi_users为0或者all为1
+			*dmi=*dmi->next;
+			dev->mc_count--;
+			kfree_s(tmp,sizeof(*tmp));
+			dev_mc_upload(dev);
+			return ;
+		}
+	}
+}
+
+
+void  dev_mc_discard(struct device*dev)
+{
+    while(dev->mc_list!=NULL)
+	{
+	    tmp=dev->mc_list;
+		dev->mc_list=dev->mc_list->next;
+		kfree_s(tmp,sizeof(*tmp));
+	}
+	dev->mc_count=0;
+}
+
+
+
+

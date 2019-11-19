@@ -1,0 +1,255 @@
+raw
+void raw_err(int err,unsigned char*header,unsigned long daddr,unsigned long saddr,struct inet_protocol*protocol)
+{
+    if(protocol==NULL)
+	    return;
+	sk=(sturct sock*)protocol->data;
+    if(sk==NULL)
+        return;//没有sk直接返回，因为没有sk则没有report_err函数无法处理
+    if(err&0xff00==(ICMP_SOURCEQUENCH<<8))	
+    {
+        if(sk->cong_window>1)
+		     sk->cong_window=sk->cong_window/2;//对半减小
+        return ;
+    }
+    sk->err=icmp_err_convert[err&0xff].errno;
+    sk->error_report(sk);
+    return;	
+}
+
+raw数据包接收总处理函数
+int raw_rcv(struct sock*sk,struct sk_buff*skb,struct device*dev,long saddr,long daddr)
+{
+    //初始化skb
+    skb->sk=sk;
+    skb->len=ntohs(skb->ip_hdr->tot_len);
+	skb->h.raw=(unsigned char*)skb->ip_hdr;
+	skb->dev=dev;
+	skb->saddr=daddr;
+	skb->daddr=saddr;
+	if(sock_queue_rcv_skb(skb)<0)//调用sock_queue_rcv_skb处理
+	{
+	    skb->sk=NULL;
+		kfree_skb(skb,FREE_READ);
+		return 0;
+	}
+	release_sock(sk);
+	return 0;
+}
+
+int sock_queue_rcv_skb(struct sock*sk,struct sk_buff*skb)
+{
+    if(sk->rmem_alloc+skb->mem_len>=sk->rcvbuf)//判断是否超过sk的rmem
+	{
+	    return -NOMEME;
+	}
+	sk->rmem_alloc+=skb->mem_len;
+	skb->sk=sk;
+	skb_queue_tail(&sk->receive_queue,skb);//挂在sk->receive_queue队列上
+	if(!sk->dead)
+	    sk->data_ready(sk,skb->len);//唤醒等待读取的睡眠进程
+	return 0;	
+	
+}
+
+int raw_sendto(struct sock*sk,unsigned char*from,int len,
+     int noblock,unsigned flags,struct sockaddr_in*usin,int addr_len)
+{
+    if(flags&MSG_OOB)//raw不支持oob数据
+	    return -ENOSUPP;
+	if(flags&~MSG_DONTROUTE)
+        return -EINVAL;	
+	if(usin)
+    {
+	    if(addr_len<sizeof(sin))
+		    return -EINVAL;
+		memcpy(&sin,usin,sizeof(sin));
+        if(sin.sin_family&&sin.sin_family!=AF_INET)
+            return -ENIVAL;			
+	}
+    else
+    {
+	    if(sk->state!=TCP_ESTABLISHED)
+		{
+		     return -EINVAL;//没有连接返回，此连接不是真的连接
+		}
+		sin.sin_family=AF_INET;
+		sin.sin_port=sk->protocol;
+		sin.sin_addr.s_addr=sk->daddr;
+	}	
+	if(sin.sin_port==0)
+	    sin.sin_port=sk->protocol;//sk->protocol==IPPROTO_RAW(255)
+	if(sin.sin_addr.s_addr==INADDR_ANY)
+        sin.sin_addr.sin_addr=ip_my_addr();
+    if(sk->broadcast==0&&ip_chk_addr(sin.sin_addr.s_addr)==IS_BROADCAST)
+        return -EACCESS;	
+	skb=sock_alloc_send_skb(sk,len+sk->prot->max_header,noblock,&err);
+    skb->sk=sk;
+    skb->free=1;
+    skb->localroute=sk->localroute|(flags&MSG_DONTROUTE);
+    tmp=sk->prot->build__header(skb,sk->saddr,sin.sin_addr.s_addr,&dev,
+	          sk->protocol,sk->opt,skb->mem_len,sk->ip_tos,sk->ip_ttl);//只会创建mac头
+	memcpy_fromfs(skb->data+tmp,from,len);//除了mac头其他都是数据
+	if(sk->protocol==IPPROTO_RAW)
+	{
+	    buff=skb->data;
+		buff+=tmp;
+		iph=(struct iphdr*)buff;
+		iph->saddr=sk->saddr;//更新saddr
+	}
+	skb->len+=tmp+len；
+	sk->prot->queue_xmit(sk,dev,skb,1);
+	release_sock(sk);
+	return  len;	
+}
+
+int raw_write(struct sock*sk,unsigned char*buff,int len,int noblock,unsigend flags)
+{
+    return raw_sendto(sk,buff,len,noblock,flags,NULL,0);
+}
+void raw_close(struct sock*sk,int timeout)
+{
+    sk->state=TCP_CLOSE;
+}
+int raw_init(struct sock*sk)
+{
+    return 0;
+}
+int raw_recvfrom(struct sock*sk,unsigned char*to,int len
+             int noblock,unsigned flags,struct sockaddr_in*sin,int*addr_len)
+{
+    if(flags&MSG_OOB)
+	    return -ENOSUPP;
+	if(sk->shutdown&RCV_SHUTDOWN)
+        return 0;
+    if(addr_len)
+        *addr_len=sizeof(*sin);
+    skb=skb_recv_datagram(sk,flags,noblock,&err);
+    if(skb==NULL)
+        return err;
+	trusize=skb->len;
+    copied=min(len,truesize);
+    skb_copy_datagram(skb,0,tocopied);
+    sk->stamp=skb->stamp;
+    if(sin)
+    {
+	    sin->sin_family=AF_INET;
+		sin->sin_addr.s_addr=skb->daddr;
+	}	
+	skb_free_data_gram(skb);
+	release_sock(sk);
+	return truesize;
+}
+
+int raw_read(struct sock*sk,unsigned char*buff,int len,int noblock,unsigned flags)
+{
+    return raw_recvfrom(sk,buff,len,noblock,flags,NULL,NULL);
+}
+
+int packet_rcv(struct sk_buff*skb,struct device*dev,sturct packet_type*pt)
+{
+    skb->dev=dev;
+	skb->len+=dev->hard_header_len;//因为链路层会调整skb->len长度
+	if(sk->rmem_alloc&0xFF000000)
+	{
+	    sk->rmem_alloc=0;
+	}
+	if(sk->rmem_alloc+skb->mem_len>=sk->recvbuf)
+	{
+	    skb->sk=NULL;
+		kfree_skb(skb,FREE_READ);
+		return 0;
+	}
+	skb->sk=sk;
+	sk->rmem_alloc+=skb->mem_len;
+	skb_queue_tail(&sk->receive_queue,skb);
+	if(!sk->dead)
+	      sk->data_ready(sk,skb->len);//唤醒等待读取的睡眠进程
+	release_sock(sk);
+    return 0;	
+}
+
+int packet_sendto(struct sock*sk,unsigned char*from,int len,int noblock,unsigned flags,
+                 struct sockaddr_in*usin,int addr_len)
+{
+    if(flags)
+	    return ;
+	if(usin)
+        if(addr_len<sizeof(*saddr))
+            return -EINVAL;
+    else 
+        return -EINVAL;
+    saddr->sa_data[13]=0;//struct sockaddr{unsigned short sa_family;char sa_data[14]}
+	dev=dev_get(saddr->sa_addr)
+	if(dev==NULL)
+	    return -ENXIO;
+	if(len>dev->mtu+dev->hard_header_len)//大了
+        return -EMSGSIZE;
+	skb=sk->prot->wmalloc(sk,len,0,..);
+	if(skb==NULL)
+	    return -ENOBUFS;
+	skb->sk=sk;
+    skb->free=1;
+    memcpy_fromfs(skb->data,from,len);
+    skb->len=len;
+    skb->arp=1;//不需要进行arp
+	if(dev->flags*IFF_UP)
+	    dev_queue_xmit(skb,dev,sk->prority);
+	else   
+    	kfree_skb(skb,FREE_WRITE);
+	return len;			
+}				 
+	
+int packet_write(struct sock*sk,unsigned char*buff,int len,int noblock,unsigned flags)
+{
+    return packet_sendto(sk,buff,len,noblock,flags,NULL,NULL);
+}
+int packet_close(sturct sock*sk,int timeout)
+{
+    sk->inuse=1;
+	sk->state=TCP_CLOSE;
+	dev_remove_pack(sk->pair);
+	kfree_s(sk->pair,sizeof(struct packet_type));
+	sk->pair=NULL;
+	release_sock(sk);
+}
+int packet_init(struct sock*sk)
+{
+    p=(struct packet_type*)kmalloc(...);
+	p->func=packet_rcv;
+	p->type=sk->num;
+	p->data=sk;
+	p->dev=NULL;
+	dev_add_pack(p);
+	sk->pair=p;//sk->pair记录p的位置
+	return 0;
+}
+
+int packet_recvfrom(struct sock*sk,unsigned char*to,int len,
+                  int noblock,unsigned flags,struct sockaddr_in*sin,int*addr_len)
+{
+    if(sk->shutdown&RCV_SHUTDOWN)
+	    return 0;
+	saddr=(struct sockaddr*)sin;	
+    if(addr_len)
+	    *addr_len=sizeof(struct sockaddr);
+	skb=skb_recv_datagram(sk,flags,noblock,&err);
+    if(skb==NULL)
+        return err;
+    truesize=skb->len;
+    copied=min(len,truesize);
+    memcpy_tofs(to,sk->data,copied);
+    if(saddr)
+    {
+	    saddr->sa_family=skb->dev->type;
+		memcpy(saddr->sa_data,skb->dev->name,14);
+	}
+    skb_free_datagram(skb);
+    release_sock(sk);
+    return truesize;	
+}
+
+int packet_read(struct sock*sk,unsigned char*buff,int len,int noblock,unsigned flags)
+{
+   return packet_recvfrom(sk,buff,noblock,flags,NULL,NULL);
+}

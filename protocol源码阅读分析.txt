@@ -1,0 +1,81 @@
+PROTOCOL
+struct inet_protocol
+{
+    int (*handler)(struct sk_buff*skb,struct device*dev,
+	              struct options*opt,unsigned long daddr,unsigned short len,
+				  unsigned long saddr,int redo,struct inet_protocol*protocol);
+	int (*frag_handler)(struct sk_buff*skb,struct device*dev,
+	              struct options*opt,unsigned long daddr,unsigned short len,
+				  unsigned long saddr,int redo,struct inet_protocol*protocol);			  
+    int (*err_handler)(int err,unsigned char*buff,unsigned long daddr,unsigned long saddr,
+	                   struct inet_protocol*protocol)
+	struct inet_protocol*next;
+    unsigned char  protocol;
+    unsigned cahr  copy:1;
+    void           *data;	
+	char           *name;
+}
+
+
+struct  inet_protocol*inet_protocol_base;管理所有网络层之上的数据
+指向 inet_protos[MAX_INET_PROTOS]
+void inet_add_protocol(struct inet_protocol*prot)
+{
+    hash=prot->protocol&(MAX_INET_PROTOS-1);
+	prot->next=inet_protos[hash];
+	inet_prots[hash]=prot;//插入链表
+	prot->copy=0;
+	p2=(struct inet_protocol*)prot->next;
+	while(p2!=NULL)
+	{
+	    if(p2->protocol==prot->protocol)
+		{
+		    prot->copy=1;//找到相同的协议设置copy=1
+			break;
+		}
+		p2=(struct inet_protocol*)p2->next;
+		 
+	}
+}
+
+
+
+void inet_del_protocol(struct inet_protocol*prot)
+{
+    hash=prot->protocol&([MAX_INET_PROTOS-1);
+	if(prot==inet_protos[hash])
+	{
+	    inet_prots[hash]=(struct inet_protocol*)prot->next;找到相同的协议删除
+		return 0;
+	}
+	p=(struct inet_protocol*)inet_prots[hash];
+	while(p!=NULL)
+	{
+	    if(p!=NULL&&p==prot)
+		{
+		    if(p->copy==0&&lp!=NULL)//若prot后面没有协议了则prot->copy被设置成0
+			   lp->copy=0;//找到相同的协议存在多个删除一个更新其他协议的copy字段
+			p->next=prot->next;
+			return 0;
+		}
+		if(p->next！=NULL&&p->next->protocol==prot->protocol)
+		    lp=p;
+		p=(struct inet_protocol*)p->next;	//判断若删除的prot是最后个元素则设置前面一个元素copy为1
+	}
+	return -1;
+}
+
+struct inet_protocol*inet_get_protocol(unsigned char prot)//prot是协议号
+{
+    hash=prot&(MAX_INET_PROTOS-1);
+	for(p=inet_prots[hash];p!=NULL;p=p->next)
+	    if(p->protocol==prot) 
+		   return ((struct inet_protocol*)p); 
+	
+    return NULL;	
+}
+
+
+
+
+
