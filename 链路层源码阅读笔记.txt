@@ -732,5 +732,335 @@ struct packet_type arp_packet_type{
 	arp_rcv,
 	NULL,
 	NULL
-};	
+};
+
+
+
+
+unisgned long ip_get_mask(unsigned long addr)
+{
+    if(addr=0L)
+	    return 0L;
+	dst=ntohl(addr);
+    if(IN_CLASSA(dst))
+        return htonl(IN_CLASSA_NET);
+    if(IN_CLASSB(dst))
+        return htonl(IN_CLASSB_NET);
+    if(IN_CLASSC(dst))
+        return htonl(IN_CLASSC_NET);
+    return 0;		
+}
+
+int ip_chk_addr(unsigned long addr)
+{
+    if(addr==INADDR_ANY||addr=INADDR_BROADCAST||addr==htonl(0x7FFFFFL))
+	    return IS_BROACAST;
+	if(addr&mask==htonl(0x7FFFFFL))
+        return IS_MYADDR;//是回环地址
+    for(dev=dev_base;dev!=NULL;dev=dev->next)
+    {
+	    if(!(dev->flags&IFF_UP))
+		    continue;//未启动的设备不在查找范围
+		if(dev->pa_addr==0)//未配置ip的设备
+            return IS_MYADDR;
+        if(addr==dev->pa_addr)
+            return IS_MYADDR;//本机地址
+        if((dev->flags&IFF_BROADCAST)&&addr==dev->pa_brdaddr)
+            return IS_BROACAST;
+		if(((addr^dev->pa_addr)&dev->pa_mask)==0)
+		{
+            if((addr&~dev->pa_mask)==0)
+			    return IS_BROADCAST;
+			if((addr&~dev->pa_mask)==~dev->pa_mask)
+                return IS_BROADCAST;			
+        }	
+        if((addr^dev->pa_addr)&mask)==0)
+        {
+		    if((addr&~mask)==0)
+			    return IS_BROADCAST;
+			if((addr&~mask)==~mask)
+                return IS_BROADCAST;				
+		}		
+		
+		
+	}  
+    if(IN_MULTICAST(addr))
+        return IN_MULTICAST; 
+	return 0;		     
+}
+
+
+获取环回地址
+unsigned long ip_my_addr(void)
+{
+    for(dev=dev_base;dev!=NULL;dev=dev->next)
+	{
+	    if(dev->flags&IFF_LOOPBACK)
+		    return dev->pa_addr;
+			
+	}
+	return 0;
+}   
+struct device* ip_dev_check(unsigned long addr)
+{
+    for(dev=dev_base;dev!=NULL;dev=dev->next)
+	{
+	    if(!(dev->flags&IFF_UP))
+	        continue;
+		if(!(dev->flags&IFF_POINTTOPOINT))
+            continue;
+		if(addr!=dev->pa_dstaddr)
+            continue;
+		return dev;	
+	}
+	for(dev=dev_base;dev!=NULL;dev=dev->next)
+	{
+	    if(!(dev->flags&IFF_UP))
+	        continue;
+		if(!(dev->flags&IFF_POINTTOPOINT))
+            continue;
+		if(dev->pa_mask&(addr^dev->pa_addr))//子网不相同
+            continue;
+		return dev;	//返回子网相同的设备
+	}
 	
+}	
+
+
+
+网络层注册函数
+void dev_add_pack(struct packet_type*pt)
+{
+    if(pt->type==htons(ETH_P_ALL))
+       dev_nit++;//统计接收所有数据包的协议
+	pt->next=ptype_base;
+    ptype_base=pt;	
+}
+
+移除网络层注册函数
+void dev_remove_pack(struct packet_type*pt)
+{
+    if(pt->type==htons(ETH_P_ALL))
+	    dev_nit--;
+	for(ptl=&ptype_base;ptl!=NULL;ptl=ptl->next)
+    {
+	    if(pt==ptl)
+		{
+		    *ptl=pt->next;
+			return ;
+		}
+	} 	
+}
+
+查找指定设备
+struct device*dev_get(char*name)
+{
+    for(dev=dev_base;dev!=NULL;dev=dev->next)
+	{
+	    if(strcmp(dev->name,name)==0)
+		    return dev;//返回name的device
+	}
+	return NULL;
+}
+
+int dev_open(struct device*dev)
+{
+    if(dev->open)
+	    ret=dev->open(dev);//调用设备自身的open
+	if(ret==0)
+    {
+	    dev->flags|=(IFF_UP|IFF_RUNNING);
+		ip_mc_allhost(dev);
+		dev_mc_upload(dev);		
+	}	
+	return ret;		
+}
+
+int dev_close(struct device *dev)
+{
+    if(dev->flags!=0)
+	{
+	    dev->flags=0;
+		if(dev->stop)
+		    dev->stop(dev);
+		ip_rt_flusg(dev);//删除对应的路由
+		arp_device_down(dev);
+		dev_mc_discard(dev);
+		dev->pa_addr=0;
+		dev->pa_dstaddr=0;
+		dev->pa_brdaddr=0;
+		dev->pa_mask=0;
+		while(ct<DEV_NUMBUFFERS)
+		{
+		    while(skb=skb_dequeue(&dev->buffs[ct]))!=NULL)//释放所有数据包
+			    if(skb->free)
+				    kfree_skb(skb,FREE_WRITE);
+			ct++;		
+		}
+		
+	}
+	return 0;
+}
+
+
+void dev_queue_xmit(struct sk_buff*skb,struct device *dev,int pri)
+{
+    if(dev==NULL)
+	    return ;
+	if(pri>=0&&!skb_device_locked(skb))
+        skb_device_locked(skb);//锁定数据包
+	if(dev->slave!=NULL&&dev->slave->pkt_queue<dev->pkt_queue&&(dev->slave->flags&IFF_UP))
+        dev=dev->slave;
+	skb->dev=dev;
+	if(skb->next!=NULL)
+	{
+	    dev->hard_start_xmit(NULL,dev);
+		return ;
+	}
+	if(pri<0)
+	{
+	    pri=-pri-1;
+		where=1;
+	}    
+	if(pri>DEV_NUMBUFFERS)
+	{
+	    pri=1;
+	}
+	if(!skb->arp&&dev->rebuild_header(skb->data,dev,skb->raddr,skb))//arp=1表示完成链路层首部创建否则重建失败返回
+	   return ;
+	if(!where)//where=0 表示是新的数据包
+	{
+	    skb->in_dev_queue=1;
+		skb_queue_tail(dev->buffs+pri,skb);//缓存
+		skb_device_unlock(skb);
+		skb=skb_dequeue(dev->buffs+pri);//取下队列第一个数据包
+		skb_device_lock(skb);
+		skb->in_dev_queue=0;	 
+	}
+	if(!where)
+	{
+	    for(nitcount=dev_nit,ptype=ptype_base;nitcount>0&&ptypoe!=NULL;ptype=ptype->next)
+		{
+		    if(ptype->type==htonl(ETH_P_ALL)&&(ptype->dev==dev||!ptype!=dev)&&ptype->data!=skb->sk)
+			{
+			    if((skb2=skb_clone(skb))==NULL)
+				    break;
+				skb2->len-=skb->dev->hard_header_len;
+                ptype->func(skb2,skb->dev,ptype);
+                nitcopunt--;				
+			}
+			
+		}
+	}
+	if(dev->hard_start_xmit(skb,dev)==0)//等于0表示发送成功
+	    return ;
+	//走到这里表示发送失败	
+	skb->in_dev_queue=1;
+    dev->pkt_queue++;
+    skb_device_unlock(skb);	
+	skb_queue_head(dev->buffs+pri,skb);//重新将数据包插入队列头
+}
+
+
+驱动向上层传送数据包接口
+void netif_rx(struct sk_buff*skb)
+{
+    skb->sk=NULL;
+	skb->free=1;
+	if(skb->stamp.tv_sec==0)
+	    skb->stamp=xtime;//设置skb时间戳
+	if(!backlog_size)
+        dropping=0;
+	else if(backlog_size>300)
+        dropping=1;//缓存过大丢包
+    if(dropping)
+         kfree_skb(skb,FREE_READ);
+	skb_queue_tail(&backlog,skb);//将数据包挂入队列
+	backlog_size++;
+	mark_bh(NET_BH);//启动中断下半部分
+	return ;		
+}
+
+遍历硬件设备发送缓存数据包
+void  dev_tint(struct sk_buff*skb)
+{
+    for(i=0;i<DEV_NUMBUFFERS;i++)
+	{
+	    while(skb=skb_dequeue(&dev->buffs[i]!=NULL))
+		{
+		    skb_device_lcok(skb);
+			dev_queue_xmit(skb,dev,-i-1);//dev_queue_xmit里的优先级是-(-i-1)-1=i
+			if(dev->tbusy)
+			   return ;//设备忙
+		}	
+	}
+}
+
+void dev_transmit(void)
+{
+    for(dev=dev_base;dev!=NULL;dev=dev->next)//遍历所有设备
+	{
+	    if(dev->flags!=0&&!dev->tbusy)
+		{
+		    dev_tint(dev);
+		}
+	}
+}
+	
+int in_net_bh()	
+{
+   return (in_bh()==0? 0:1);
+}
+
+void net_bh(void*tmp)
+{
+    if(set_bit(1,&in_bh))
+       return ;//如果in_bh已经被设置成1则立刻返回net_bh 不允许重入
+	dev_transmit();
+    while((skb=skb_dequeue(&backlog)!=NULL))
+    {
+	   backlog_size--;
+	   skb->h.raw=slb->data+dev->hard_header_len;//将h.raw指向网络层头部
+	   skb->len-=skb->dev->hard_header_len;
+	   type=skb->dev->type_trans(skb,skb->dev);
+	   for(ptype=ptype_base;ptype!=NULL;ptype=ptype->next)
+	   {   pt_pre=NULL;
+	       if((ptype->type==type||ptype->type==htons(ETH_P_ALL))&&(!ptype->dev||ptype->dev==skb->dev))
+		   {//type匹配
+		       if(pt_pre)
+			   {
+			        skb2=skb_clone(skb,GFP_AUTOMIC);
+				    if(skb2)
+				        pt_pre->func(skb2,skb2->dev,pt_pre);//上传给每个为ETH_P_ALL的ptype或者匹配的type	  
+			   }
+			  
+		   }
+		   pt_pre=ptype;
+	   }
+	    if(pt_pre)
+           pt_pre->func(skb,skb->dev,pt_pre);
+	    else 
+	       kfree_skb(skb,FREE_WRITE);
+	    dev_transmit();	
+	    
+	}
+	in_bh=0;
+	dev_transmit();
+   	
+}
+
+
+网络设备信息获取函数
+int dev_ifconf(char*arg)
+{....}
+数据包接收发送统计函数
+int sprintf_stats(char*buffer,struct device*dev)
+int dev_get_info(char*buffer,char**start,off_t offset,int length)
+ip地址掩码合法性检查函数
+int bad_mask(unsigned long mask,unsigned long addr )
+网络设备控制函数
+int dev_ifsioc(void*arg,unsigned int getest)
+链路层控制总入口函数
+int dev_ioctl(unsigned int cmd,void*arg)
+网络设备初始化函数
+void dev_init(void)
